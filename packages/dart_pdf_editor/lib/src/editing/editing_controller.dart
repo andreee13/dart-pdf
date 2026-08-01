@@ -19,6 +19,7 @@ import 'line_style.dart';
 import 'editing_stamps.dart';
 import 'text_prompt.dart';
 import 'thumbnail_cache.dart';
+import 'editing_signature.dart';
 
 PdfEmbeddableImage _decodeEmbeddableImage(Uint8List bytes) =>
     PdfEmbeddableImage.decode(bytes);
@@ -7224,6 +7225,18 @@ class PdfEditingController extends ChangeNotifier {
         },
         (e, f) => e.setButtonImage(f, image));
   }
+
+  bool setFormSignatureValue(String name, PdfInkSignature signature) =>
+      _fillField(
+          name,
+          const {
+            PdfFieldType.signature,
+          },
+          (e, f) => e.setSignatureValue(f,
+              strokes: signature.strokes,
+              color: signature.color,
+              aspect: signature.aspect,
+              pressures: signature.pressures));
 
   /// Async counterpart to [setFormButtonImage]. See [placeImageAsync].
   Future<bool> setFormButtonImageAsync(

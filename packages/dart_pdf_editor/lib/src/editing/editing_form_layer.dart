@@ -260,65 +260,19 @@ class _FormInteractionLayerState extends State<FormInteractionLayer> {
     _controller.setEditingText(false);
   }
 
-  ({
-    List<List<(double, double)>> strokes,
-    List<List<double>?> pressures,
-    int color,
-    double strokeWidth
-  })? _signaturePlacement(
-      PdfInkSignature signature, int pageIndex, double x, double y,
-      {double width = 160}) {
-    final box = _controller.pageAt(pageIndex).cropBox;
-    final aspect = signature.aspect > 0 ? signature.aspect : 2.0;
-    var w = width.clamp(8.0, box.width * 0.9);
-    var h = w / aspect;
-    if (h > box.height * 0.9) {
-      h = box.height * 0.9;
-      w = h * aspect;
-    }
-    final cx = x.clamp(box.left + w / 2, box.right - w / 2);
-    final cy = y.clamp(box.bottom + h / 2, box.top - h / 2);
-    final left = cx - w / 2, top = cy + h / 2;
-    return (
-      strokes: [
-        for (final stroke in signature.strokes)
-          [
-            // normalized pad space is y-down; page space is y-up
-            for (final (nx, ny) in stroke) (left + nx * w, top - ny * h),
-          ],
-      ],
-      pressures: signature.pressures,
-      // follow the selected toolbar colour, like every other tool
-      color: _controller.preferences.color.toARGB32() & 0xFFFFFF,
-      strokeWidth: w / 60, // pen-like: ~2.7pt at the default width
-    );
-  }
-
   void _openSignatureEditor(PdfFormField field, Rect viewRect) async {
+    setState(() {
+      _editRect = viewRect;
+      _editPageRect = widget.geometry.toPageRect(viewRect);
+      _afterValue = null;
+    });
     final signature = await showPdfSignatureDialog(context);
+    if (!mounted) return;
     if (signature != null) {
-      final placement = _signaturePlacement(
-        signature,
-        widget.pageIndex,
-        viewRect.top,
-        viewRect.left - viewRect.height / 2,
-        width: viewRect.width,
-      );
-      if (placement == null) return;
-      _controller.apply(
-        (e) => e.addInk(
-          widget.pageIndex,
-          placement.strokes,
-          color: placement.color,
-          strokeWidth: placement.strokeWidth,
-          opacity: 1,
-          pressures: placement.pressures,
-          author: _controller.preferences.author,
-        ),
-      );
+      _controller.setFormSignatureValue(field.name, signature);
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _editingField != null) _focus.requestFocus();
+      if (mounted) _focus.requestFocus();
     });
   }
 

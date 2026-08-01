@@ -40,6 +40,86 @@ extension PdfFormFilling on PdfEditor {
     _finishFieldEdit(field);
   }
 
+  void setSignatureValue(
+    PdfFormField field, {
+    required List<List<(double, double)>> strokes,
+    required int color,
+    required double aspect,
+    required List<List<double>?> pressures,
+  }) {
+    _checkFillable(field, const {PdfFieldType.signature});
+
+    final widgets = field.widgets;
+
+    for (var i = 0; i < widgets.length; i++) {
+      final widget = widgets[i];
+
+      final rect = pdfRectFrom(document.cos, widget['Rect']);
+      if (rect == null || rect.width <= 0 || rect.height <= 0) continue;
+
+      final w = rect.width;
+      final h = rect.height;
+
+      final fieldAspect = w / h;
+      double drawWidth, drawHeight;
+      double offsetX = 0, offsetY = 0;
+
+      if (aspect > fieldAspect) {
+        drawWidth = w;
+        drawHeight = w / aspect;
+        offsetY = (h - drawHeight) / 2;
+      } else {
+        drawHeight = h;
+        drawWidth = h * aspect;
+        offsetX = (w - drawWidth) / 2;
+      }
+
+      final buffer = StringBuffer();
+      final r = ((color >> 16) & 0xFF) / 255.0;
+      final g = ((color >> 8) & 0xFF) / 255.0;
+      final b = (color & 0xFF) / 255.0;
+
+      buffer.writeln(
+          '${r.toStringAsFixed(3)} ${g.toStringAsFixed(3)} ${b.toStringAsFixed(3)} RG');
+      buffer.writeln('2 w');
+      buffer.writeln('1 J');
+      buffer.writeln('1 j');
+
+      for (var stroke in strokes) {
+        if (stroke.isEmpty) continue;
+
+        for (var j = 0; j < stroke.length; j++) {
+          final point = stroke[j];
+          final x = offsetX + (point.$1 * drawWidth);
+          final y = offsetY + (drawHeight - (point.$2 * drawHeight));
+
+          if (j == 0) {
+            buffer.writeln('${x.toStringAsFixed(2)} ${y.toStringAsFixed(2)} m');
+          } else {
+            buffer.writeln('${x.toStringAsFixed(2)} ${y.toStringAsFixed(2)} l');
+          }
+        }
+        buffer.writeln('S');
+      }
+
+      final apStream = CosStream(
+        CosDictionary({
+          'Type': CosName('XObject'),
+          'Subtype': CosName('Form'),
+          'BBox':
+              CosArray([CosInteger(0), CosInteger(0), CosReal(w), CosReal(h)]),
+        }),
+        utf8.encode(buffer.toString()),
+      );
+
+      _setNormalAppearance(widget, apStream);
+
+      if (!identical(widget, field.dict)) _stageFormDict(field, widget);
+    }
+
+    _finishFieldEdit(field);
+  }
+
   /// Fills a push-button field with an image (the conventional way PDF
   /// forms carry signatures and logos): each widget's normal appearance
   /// becomes the image scaled to fit its rectangle, centered, over the
@@ -471,6 +551,13 @@ extension PdfFormFilling on PdfEditor {
         : PdfEmbeddedFont.fromFontDict(cos, fontDict, da.fontName);
     final text = embedded != null ? rawText : sanitizeFieldText(rawText);
 
+    final isComb = (field.flags & 16777216) != 0;
+    final maxLenCos = field.dict['MaxLen'];
+    final maxLen = maxLenCos is CosInteger ? maxLenCos.value : 0;
+    final multiline = field.isMultiline;
+
+    final useComb = isComb && !multiline && maxLen > 0;
+
     final widgets = field.widgets;
     for (var widgetIndex = 0; widgetIndex < widgets.length; widgetIndex++) {
       final widget = widgets[widgetIndex];
@@ -486,7 +573,6 @@ extension PdfFormFilling on PdfEditor {
           ? embedded.measure(s, size)
           : _measureFieldText(fontDict, s, size, widths: fontWidths);
 
-      final multiline = field.isMultiline;
       // Line boxes are laid out and clipped in the field's own /Widths (or the
       // base-14 fallback); the shared builder consumes it through [PdfTextFont]
       // for the resource name and ascent while measurement stays on [measure].
@@ -515,12 +601,29 @@ extension PdfFormFilling on PdfEditor {
         }
         lines = wrap(size);
       } else {
-        final single = text.replaceAll('\n', ' ');
+        var single = text.replaceAll('\n', ' ');
+
+        if (useComb && single.length > maxLen) {
+          single = single.substring(0, maxLen);
+        }
+
         if (size == 0) {
           size = (visual.height - 2 * pad) / lineFactor;
-          final width = measure(single, size);
-          if (width > visual.width - 2 * pad && width > 0) {
-            size *= (visual.width - 2 * pad) / width;
+          if (useComb) {
+            final cellW = (visual.width - 2 * pad) / maxLen;
+            var maxCharW = 0.0;
+            for (var i = 0; i < single.length; i++) {
+              final charW = measure(single[i], size);
+              if (charW > maxCharW) maxCharW = charW;
+            }
+            if (maxCharW > cellW && maxCharW > 0) {
+              size *= cellW / maxCharW;
+            }
+          } else {
+            final width = measure(single, size);
+            if (width > visual.width - 2 * pad && width > 0) {
+              size *= (visual.width - 2 * pad) / width;
+            }
           }
           size = size.clamp(4.0, 144.0);
         }
@@ -547,30 +650,61 @@ extension PdfFormFilling on PdfEditor {
         ..rect(visual.left + 1, visual.bottom + 1, visual.width - 2,
             visual.height - 2)
         ..clip();
-      writePdfTextBox(
-        writer,
-        visual,
-        lines,
-        font: font,
-        fontSize: size,
-        align: align,
-        padding: pad,
-        lineHeight: size * lineFactor,
-        vAlign:
-            multiline ? PdfTextBoxVAlign.top : PdfTextBoxVAlign.centerLine,
-        clip: false,
-        clampAlign: true,
-        measureLine: (s) => measure(s, size),
-        writeColor: (w) => w.raw(da.colorOps),
-        emitLine: (w, line) {
-          final rendered = pdfVisualText(line, resolvedDirection);
+
+      if (useComb) {
+        writer.raw('BT');
+        writer.raw(da.colorOps);
+        writer.raw('/${da.fontName} ${size.toStringAsFixed(2)} Tf');
+
+        final safeText = lines.first;
+        final cellWidth = (visual.width - 2 * pad) / maxLen;
+
+        final textY = visual.bottom + (visual.height / 2) - (size * 0.3);
+
+        for (var i = 0; i < safeText.length; i++) {
+          final char = safeText[i];
+          final rendered = pdfVisualText(char, resolvedDirection);
+          final charWidth = measure(char, size);
+
+          final charX =
+              visual.left + pad + (i * cellWidth) + (cellWidth - charWidth) / 2;
+
+          writer.raw(
+              '1 0 0 1 ${charX.toStringAsFixed(2)} ${textY.toStringAsFixed(2)} Tm');
+
           if (embedded != null) {
-            w.showGlyphHex(embedded.encodeHex(rendered));
+            writer.showGlyphHex(embedded.encodeHex(rendered));
           } else {
-            w.showText(rendered);
+            writer.showText(rendered);
           }
-        },
-      );
+        }
+        writer.raw('ET');
+      } else {
+        writePdfTextBox(
+          writer,
+          visual,
+          lines,
+          font: font,
+          fontSize: size,
+          align: align,
+          padding: pad,
+          lineHeight: size * lineFactor,
+          vAlign:
+              multiline ? PdfTextBoxVAlign.top : PdfTextBoxVAlign.centerLine,
+          clip: false,
+          clampAlign: true,
+          measureLine: (s) => measure(s, size),
+          writeColor: (w) => w.raw(da.colorOps),
+          emitLine: (w, line) {
+            final rendered = pdfVisualText(line, resolvedDirection);
+            if (embedded != null) {
+              w.showGlyphHex(embedded.encodeHex(rendered));
+            } else {
+              w.showText(rendered);
+            }
+          },
+        );
+      }
       writer.restore();
       _endWidgetOrientation(writer, rotation);
       writer.raw('EMC');
