@@ -1,5 +1,39 @@
 # Changelog
 
+## 3.6.0
+
+- Lockstep minor release to align the dart-pdf package suite at 3.6.0. No
+  public `pdf_cos` API changes since 3.5.1.
+
+## 3.5.1
+
+- Decode JBIG2 refined text symbols, including refinement deltas, offsets, and
+  shared arithmetic contexts, so scanned MRC text layers render correctly.
+
+## 3.5.0
+
+- Add `PdfSourceLoadOptions.completeFirstPaintPageTree`. Progressive preview
+  callers can stop the initial page-tree walk after `firstPaintPages`, avoiding
+  one range request per leaf before page one can paint; the default remains the
+  correctness-first complete walk for existing callers.
+- Reduce allocation and cache pressure in byte sources, the lexer, and content
+  parsing while retaining the parser's lenient handling of malformed PDFs.
+
+## 3.4.0
+
+- Lockstep minor release to align the dart-pdf package suite at 3.4.0. No
+  public `pdf_cos` API changes since 3.3.1.
+
+## 3.3.1
+
+- Lockstep patch release to align the dart-pdf package suite at 3.3.1. No
+  public `pdf_cos` API changes since 3.3.0.
+
+## 3.3.0
+
+- Lockstep minor release to align the dart-pdf package suite at 3.3.0. No
+  public `pdf_cos` API changes since 3.2.0.
+
 ## 3.2.0
 
 - Lockstep minor release to align the dart-pdf package suite at 3.2.0. No

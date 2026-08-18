@@ -71,7 +71,8 @@ class TranslatingPdfDevice implements PdfDevice {
   @override
   void fillMesh(PdfMesh mesh, double alpha) => target.fillMesh(
       PdfMesh([
-        for (final v in mesh.vertices) PdfMeshVertex(v.x + dx, v.y + dy, v.color),
+        for (final v in mesh.vertices)
+          PdfMeshVertex(v.x + dx, v.y + dy, v.color),
       ], mesh.triangles),
       alpha);
 
@@ -98,7 +99,17 @@ class TranslatingPdfDevice implements PdfDevice {
         fill: run.fill,
         strokeColor: run.strokeColor,
         strokeWidth: run.strokeWidth,
+        fillAlpha: run.fillAlpha,
+        strokeAlpha: run.strokeAlpha,
         mcid: run.mcid,
+        // Em-space, so a page-space translation leaves them alone - but they
+        // still have to be carried, or a tiled cell's substituted text loses
+        // its spacing and its per-character placement (#649).
+        letterSpacing: run.letterSpacing,
+        wordSpacing: run.wordSpacing,
+        leadingSpace: run.leadingSpace,
+        visibleWidth: run.visibleWidth,
+        charOffsets: run.charOffsets,
       ));
 
   @override
@@ -110,6 +121,7 @@ class TranslatingPdfDevice implements PdfDevice {
         stencilColor: request.stencilColor,
         isInline: request.isInline,
         decoded: request.decoded,
+        sourceReference: request.sourceReference,
       ));
 
   @override

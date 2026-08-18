@@ -74,6 +74,99 @@ void main() {
     });
   });
 
+  group('viewer position across page edits', () {
+    Future<(PdfEditingController, PdfViewerController)> pumpViewer(
+      WidgetTester tester,
+    ) async {
+      final editing = PdfEditingController(buildMultiPagePdf(5));
+      final viewer = PdfViewerController();
+      addTearDown(editing.dispose);
+      addTearDown(viewer.dispose);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: PdfViewer(
+            editing: editing,
+            controller: viewer,
+            initialFit: PdfViewerFit.width,
+            pagePreviews: false,
+          ),
+        ),
+      ));
+      await tester.pump();
+      viewer.restoreViewport(
+        const PdfViewport(page: 3, top: 0.18, left: 0.12, zoom: 1.5),
+      );
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      return (editing, viewer);
+    }
+
+    void expectViewport(
+      PdfEditingController editing,
+      PdfViewerController viewer, {
+      required int page,
+      required String label,
+    }) {
+      final viewport = viewer.captureViewport();
+      expect(viewport, isNotNull);
+      expect(viewport!.page, page);
+      expect(viewer.currentPage, page);
+      expect(labelOf(editing.document, page), label);
+      expect(viewport.top, closeTo(0.18, 0.02));
+      expect(viewport.left, closeTo(0.12, 0.02));
+      expect(viewport.zoom, closeTo(1.5, 0.02));
+    }
+
+    testWidgets('adding pages keeps the current page and zoom',
+        (tester) async {
+      final (editing, viewer) = await pumpViewer(tester);
+      expectViewport(editing, viewer, page: 3, label: 'Page 4');
+
+      editing.addBlankPage(at: 1);
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      expectViewport(editing, viewer, page: 4, label: 'Page 4');
+
+      editing.addBlankPage();
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      expectViewport(editing, viewer, page: 4, label: 'Page 4');
+    });
+
+    testWidgets('deleting pages keeps the nearest surviving view',
+        (tester) async {
+      final (editing, viewer) = await pumpViewer(tester);
+      expectViewport(editing, viewer, page: 3, label: 'Page 4');
+
+      // A deletion before the viewport follows the same page to its new slot.
+      editing.removePage(0);
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      expectViewport(editing, viewer, page: 2, label: 'Page 4');
+
+      // Deleting the viewed page keeps its position and shows the page that
+      // moved into that slot instead of returning to page 1.
+      editing.removePage(2);
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      expectViewport(editing, viewer, page: 2, label: 'Page 5');
+
+      // At the end of the document the previous page is the nearest survivor.
+      editing.removePage(2);
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      expectViewport(editing, viewer, page: 1, label: 'Page 3');
+    });
+
+    testWidgets('reordering pages follows the viewed page by identity',
+        (tester) async {
+      final (editing, viewer) = await pumpViewer(tester);
+      expectViewport(editing, viewer, page: 3, label: 'Page 4');
+
+      editing.movePage(3, 0);
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      expectViewport(editing, viewer, page: 0, label: 'Page 4');
+
+      editing.undo();
+      await tester.pumpAndSettle(const Duration(milliseconds: 300));
+      expectViewport(editing, viewer, page: 3, label: 'Page 4');
+    });
+  });
+
   group('duplicatePages', () {
     test('copies one page right after itself', () {
       final editing = PdfEditingController(buildMultiPagePdf(3));
@@ -227,6 +320,53 @@ void main() {
       editing.selectAllPages();
       expect(editing.removeSelectedPages(), isFalse);
       expect(editing.document.pageCount, 3);
+    });
+
+    test('dragging a selected page reorders the whole selection', () {
+      final editing = PdfEditingController(buildMultiPagePdf(6));
+      addTearDown(editing.dispose);
+      editing.selectPage(1);
+      editing.togglePageSelection(3);
+
+      editing.movePage(1, 4);
+
+      expect(labelsOf(editing.document),
+          ['Page 1', 'Page 3', 'Page 5', 'Page 6', 'Page 2', 'Page 4']);
+      expect(editing.selectedPages, [4, 5]);
+      expect(editing.pageSelectionAnchor, 4);
+      editing.undo();
+      expect(labelsOf(editing.document),
+          ['Page 1', 'Page 2', 'Page 3', 'Page 4', 'Page 5', 'Page 6']);
+    });
+
+    test('a selected-page reorder preserves order and clamps at an edge', () {
+      final editing = PdfEditingController(buildMultiPagePdf(6));
+      addTearDown(editing.dispose);
+      editing.selectPage(2);
+      editing.togglePageSelection(4);
+
+      // Page 5 is the dragged member, so it cannot itself land at zero while
+      // Page 3 remains before it. Clamp the two-page block instead.
+      editing.movePage(4, 0);
+
+      expect(labelsOf(editing.document),
+          ['Page 3', 'Page 5', 'Page 1', 'Page 2', 'Page 4', 'Page 6']);
+      expect(editing.selectedPages, [0, 1]);
+      expect(editing.pageSelectionAnchor, 1);
+    });
+
+    test('dropping a selected page on its selection is a no-op', () {
+      final editing = PdfEditingController(buildMultiPagePdf(5));
+      addTearDown(editing.dispose);
+      editing.selectPage(1);
+      editing.togglePageSelection(3);
+
+      editing.movePage(1, 3);
+
+      expect(labelsOf(editing.document),
+          ['Page 1', 'Page 2', 'Page 3', 'Page 4', 'Page 5']);
+      expect(editing.selectedPages, [1, 3]);
+      expect(editing.isModified, isFalse);
     });
 
     test('a structural page edit clears the selection', () {
@@ -867,6 +1007,50 @@ void main() {
       expect(find.byIcon(Icons.check), findsNothing);
       await tester.pump(const Duration(seconds: 2));
     });
+
+    testWidgets('multi-page reorder shows a count and dims companion pages',
+        (tester) async {
+      tester.view.physicalSize = const Size(800, 1400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final editing = PdfEditingController(buildMultiPagePdf(4));
+      final viewer = PdfViewerController();
+      addTearDown(editing.dispose);
+      addTearDown(viewer.dispose);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Row(children: [
+            PdfThumbnailSidebar(controller: editing, viewerController: viewer),
+            const Expanded(child: SizedBox()),
+          ]),
+        ),
+      ));
+      await tester.pump();
+      editing.selectPage(1);
+      editing.selectPageRange(2);
+      await tester.pump();
+
+      final list = tester.widget<ReorderableListView>(
+        find.byType(ReorderableListView),
+      );
+      list.onReorderStart!(1);
+      await tester.pump();
+      final companion = tester.widget<Opacity>(
+        find.byKey(const ValueKey('pdf-thumbnail-reorder-companion-2')),
+      );
+      expect(companion.opacity, 0.35);
+
+      final proxy = list.proxyDecorator!(
+        const SizedBox(width: 100, height: 100),
+        1,
+        const AlwaysStoppedAnimation(1),
+      );
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: proxy)));
+      expect(find.byKey(const ValueKey('pdf-thumbnail-reorder-count')),
+          findsOneWidget);
+      expect(find.text('2 pages'), findsOneWidget);
+    });
   });
 
   group('thumbnail context menu', () {
@@ -1015,10 +1199,9 @@ void main() {
 
     testWidgets('⌘V paste reveals the new page instead of jumping to the top',
         (tester) async {
-      // A paste inserts pages, so the viewer resets its scroll to the top in
-      // a post-frame callback (a geometry-changing revision). The following
-      // strip must not chase that reset back to page 0 - it should land on
-      // the pages that were just pasted.
+      // Structural edits preserve the existing view by default. Pasting from
+      // the strip intentionally overrides that anchor and reveals the pages
+      // that were just pasted.
       tester.view.physicalSize = const Size(800, 1400);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);

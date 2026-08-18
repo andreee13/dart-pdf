@@ -15,6 +15,7 @@ import 'editing/editing_preferences.dart';
 import 'editing/editing_properties.dart';
 import 'editing/editing_sidebar.dart';
 import 'editing/editing_stamps.dart';
+import 'editing/editing_thumbnail_drop.dart';
 import 'editing/editing_thumbnails.dart';
 import 'editing/editing_toolbar.dart';
 import 'editing/text_prompt.dart';
@@ -33,6 +34,7 @@ import 'search_panel.dart';
 import 'shell_chrome.dart';
 import 'shell_session.dart';
 import 'theme.dart';
+import 'tile_raster_backend.dart';
 
 /// Builds the editing toolbar for [PdfEditorView].
 ///
@@ -216,6 +218,8 @@ class PdfEditorView extends StatefulWidget {
     this.viewerController,
     this.preferences,
     this.performance,
+    this.tileRasterBackend = const PdfCanvasTileRasterBackend(),
+    this.autoRenderWorker = true,
     this.features = const PdfEditorFeatures(),
     this.onSave,
     this.onSaveAs,
@@ -224,6 +228,7 @@ class PdfEditorView extends StatefulWidget {
     this.onDocumentChanged,
     this.onPickPdfToInsert,
     this.onExportPages,
+    this.thumbnailDropController,
     this.onAction,
     this.onAnnotationTap,
     this.pageOverlayBuilder,
@@ -256,10 +261,14 @@ class PdfEditorView extends StatefulWidget {
     this.viewerTheme,
     this.rasterCache,
     this.textCache,
+    this.pagePreviewLodPolicy = const PdfPagePreviewLodPolicy(),
     this.pageRasterCachePolicy = const PdfPageRasterCachePolicy(),
     this.pageRasterWarmPolicy = const PdfPageRasterWarmPolicy.disabled(),
   })  : source = null,
-        options = const PdfSourceLoadOptions(firstPaintPages: 1),
+        options = const PdfSourceLoadOptions(
+          firstPaintPages: 1,
+          completeFirstPaintPageTree: false,
+        ),
         onProgress = null,
         onFirstPaint = null,
         loadingBuilder = null,
@@ -287,7 +296,10 @@ class PdfEditorView extends StatefulWidget {
   const PdfEditorView.source(
     PdfByteSource this.source, {
     super.key,
-    this.options = const PdfSourceLoadOptions(firstPaintPages: 1),
+    this.options = const PdfSourceLoadOptions(
+      firstPaintPages: 1,
+      completeFirstPaintPageTree: false,
+    ),
     this.documentId,
     this.onProgress,
     this.onFirstPaint,
@@ -296,6 +308,8 @@ class PdfEditorView extends StatefulWidget {
     this.viewerController,
     this.preferences,
     this.performance,
+    this.tileRasterBackend = const PdfCanvasTileRasterBackend(),
+    this.autoRenderWorker = true,
     this.features = const PdfEditorFeatures(),
     this.onSave,
     this.onSaveAs,
@@ -304,6 +318,7 @@ class PdfEditorView extends StatefulWidget {
     this.onDocumentChanged,
     this.onPickPdfToInsert,
     this.onExportPages,
+    this.thumbnailDropController,
     this.onAction,
     this.onAnnotationTap,
     this.pageOverlayBuilder,
@@ -336,6 +351,7 @@ class PdfEditorView extends StatefulWidget {
     this.viewerTheme,
     this.rasterCache,
     this.textCache,
+    this.pagePreviewLodPolicy = const PdfPagePreviewLodPolicy(),
     this.pageRasterCachePolicy = const PdfPageRasterCachePolicy(),
     this.pageRasterWarmPolicy = const PdfPageRasterWarmPolicy.disabled(),
   })  : bytes = null,
@@ -366,6 +382,12 @@ class PdfEditorView extends StatefulWidget {
   /// Shown when a [source] open fails before any page could paint.
   final Widget Function(BuildContext context, Object error)? errorBuilder;
 
+  /// Whether the editor's reader surface starts an off-main-thread render
+  /// worker. Defaults to true. A source-backed editor disables it only for the
+  /// sparse, read-only first-paint buffer and restores it with the complete
+  /// editable document.
+  final bool autoRenderWorker;
+
   /// Optional persistent on-disk preview cache (see [PdfRasterCache]).
   /// Keyed by [documentId] (or, with [bytes], their [pdfContentKey]), so
   /// reopening a previously-seen document paints soft page content
@@ -377,6 +399,10 @@ class PdfEditorView extends StatefulWidget {
   /// active edit session mutates page content, so its text is never served
   /// from the content-keyed persistent cache (in-memory only).
   final PdfPageTextCache? textCache;
+
+  /// Intermediate fast-scroll preview levels and their shared memory budget.
+  /// See [PdfViewer.pagePreviewLodPolicy].
+  final PdfPagePreviewLodPolicy pagePreviewLodPolicy;
 
   /// Memory policy for exact full-resolution rasters of previously visited
   /// pages. See [PdfViewer.pageRasterCachePolicy].
@@ -410,6 +436,9 @@ class PdfEditorView extends StatefulWidget {
   /// Auto controller. Worker-count recommendations apply only when this shell
   /// naturally restarts its revision-bound worker.
   final PdfPerformanceController? performance;
+
+  /// See [PdfViewer.tileRasterBackend].
+  final PdfTileRasterBackend tileRasterBackend;
 
   final PdfEditorFeatures features;
 
@@ -450,6 +479,15 @@ class PdfEditorView extends StatefulWidget {
   /// thumbnail strip's "Export pages…" action asks for the range, then
   /// hands the bytes here). When null the action is hidden.
   final void Function(Uint8List bytes)? onExportPages;
+
+  /// Lets a PDF dragged in from outside the app be dropped at a chosen
+  /// position in the page thumbnails (strip or full-area grid) instead of
+  /// only being appended: the panels paint an insertion marker where the
+  /// pages would land, and the host reads the index back on drop. Only the
+  /// host sees the platform's drag stream, so it drives the controller -
+  /// see [PdfThumbnailDropController] for the wiring. Needs
+  /// [PdfEditorFeatures.pageEditing].
+  final PdfThumbnailDropController? thumbnailDropController;
 
   /// See [PdfViewer.onAction].
   final PdfActionHandler? onAction;
@@ -610,8 +648,7 @@ class _PdfEditorViewState extends State<PdfEditorView> {
   @override
   void initState() {
     super.initState();
-    _toolShortcuts =
-        Map<PdfEditTool, PdfToolShortcut>.of(widget.toolShortcuts);
+    _toolShortcuts = Map<PdfEditTool, PdfToolShortcut>.of(widget.toolShortcuts);
     // In source mode the shell is owned by the inner byte-based PdfEditorView
     // the progressive builder mounts once the first-paint bytes arrive.
     if (_isSource) return;
@@ -622,6 +659,7 @@ class _PdfEditorViewState extends State<PdfEditorView> {
       viewerController: widget.viewerController,
       performance: widget.performance,
       documentId: widget.documentId,
+      renderWorkerEnabled: widget.autoRenderWorker,
       prepareSession: _prepareSession,
       onSessionChanged: _onSessionChanged,
     );
@@ -675,6 +713,7 @@ class _PdfEditorViewState extends State<PdfEditorView> {
       viewerController: widget.viewerController,
       performanceController: widget.performance,
       documentId: widget.documentId,
+      renderWorkerEnabled: widget.autoRenderWorker,
       prepareSession: _prepareSession,
       onSessionChanged: _onSessionChanged,
     );
@@ -710,6 +749,8 @@ class _PdfEditorViewState extends State<PdfEditorView> {
         viewerController: widget.viewerController,
         preferences: widget.preferences,
         performance: widget.performance,
+        tileRasterBackend: widget.tileRasterBackend,
+        autoRenderWorker: complete && widget.autoRenderWorker,
         features: complete ? widget.features : _gatedFeatures(widget.features),
         // The first-paint buffer is incomplete: no save/change/insert/export
         // until the whole file is present.
@@ -720,6 +761,8 @@ class _PdfEditorViewState extends State<PdfEditorView> {
         onDocumentChanged: complete ? widget.onDocumentChanged : null,
         onPickPdfToInsert: complete ? widget.onPickPdfToInsert : null,
         onExportPages: complete ? widget.onExportPages : null,
+        thumbnailDropController:
+            complete ? widget.thumbnailDropController : null,
         onAction: widget.onAction,
         onAnnotationTap: widget.onAnnotationTap,
         pageOverlayBuilder: widget.pageOverlayBuilder,
@@ -884,6 +927,11 @@ class _PdfEditorViewState extends State<PdfEditorView> {
                 onPickPdfToInsert:
                     features.pageEditing ? widget.onPickPdfToInsert : null,
                 onExportPages: widget.onExportPages,
+                // dropping a PDF between two tiles inserts it there; a
+                // read-only shell takes no structural page edits
+                fileDropController: features.pageEditing
+                    ? widget.thumbnailDropController
+                    : null,
                 renderWorker: _shell.worker,
                 rasterCache: thumbnailDisk,
               );
@@ -951,6 +999,9 @@ class _PdfEditorViewState extends State<PdfEditorView> {
                 onPickPdfToInsert:
                     features.pageEditing ? widget.onPickPdfToInsert : null,
                 onExportPages: widget.onExportPages,
+                fileDropController: features.pageEditing
+                    ? widget.thumbnailDropController
+                    : null,
                 onOpenPage: (_) => prefs.showThumbnailView = false,
                 renderWorker: _shell.worker,
                 rasterCache: thumbnailDisk,
@@ -1396,11 +1447,15 @@ class _PdfEditorViewState extends State<PdfEditorView> {
                         backgroundColor: widget.backgroundColor,
                         pageColor: pageColor,
                         showAnnotations: prefs.showAnnotations,
+                        showScrollbarChapters: prefs.showScrollbarChapters,
                         highlightFormFields: prefs.highlightFormFields,
                         renderWorker: _shell.worker,
+                        autoRenderWorker: widget.autoRenderWorker,
                         performance: _performance,
+                        tileRasterBackend: widget.tileRasterBackend,
                         rasterCache: widget.rasterCache,
                         textCache: widget.textCache,
+                        pagePreviewLodPolicy: widget.pagePreviewLodPolicy,
                         pageRasterCachePolicy: widget.pageRasterCachePolicy,
                         pageRasterWarmPolicy: widget.pageRasterWarmPolicy,
                         documentId: _documentKey,

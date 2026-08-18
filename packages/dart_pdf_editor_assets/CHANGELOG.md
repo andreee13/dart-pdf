@@ -1,5 +1,36 @@
 # Changelog
 
+## 3.6.0
+
+- Regenerate the bundled web render worker for `dart_pdf_editor` 3.6.0.
+- Bundle TeX Gyre Adventor regular and bold as metric-compatible fallbacks for
+  unembedded Century Gothic and Avant Garde text.
+
+## 3.5.1
+
+- Regenerate the bundled web render worker for `dart_pdf_editor` 3.5.1 and
+  align the optional asset package with the lockstep patch release.
+
+## 3.5.0
+
+- Regenerate the bundled web render worker for `dart_pdf_editor` 3.5.0 and
+  align the optional asset package with the lockstep release.
+
+## 3.4.0
+
+- Lockstep minor release to align the optional bundled assets with
+  `dart_pdf_editor` 3.4.0.
+
+## 3.3.1
+
+- Lockstep patch release to align the optional bundled assets with
+  `dart_pdf_editor` 3.3.1.
+
+## 3.3.0
+
+- Lockstep minor release to align the optional bundled assets with
+  `dart_pdf_editor` 3.3.0.
+
 ## 3.2.0
 
 - Lockstep minor release to align the optional bundled assets with

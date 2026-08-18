@@ -118,6 +118,18 @@ void main() {
     expect(find.byType(PdfPageView), findsWidgets);
   });
 
+  testWidgets('reports readiness for the mounted page raster', (tester) async {
+    final controller = await pumpViewer(tester);
+    for (var i = 0; i < 100 && !controller.isPageRasterReady(0); i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    expect(controller.isPageRasterReady(0), isTrue);
+    expect(controller.isPageRasterReady(99), isFalse);
+  });
+
   testWidgets('opens fitted to the whole page by default', (tester) async {
     final controller = PdfViewerController();
     await tester.pumpWidget(MaterialApp(
@@ -689,6 +701,33 @@ void main() {
     expect(controller.currentPage, 0);
   });
 
+  testWidgets('slow trackpad pinch-out does not latch as scrolling',
+      (tester) async {
+    final controller = await pumpViewer(tester);
+    final scrollable =
+        tester.state<ScrollableState>(find.byType(Scrollable).first);
+    final initialZoom = controller.zoom;
+
+    final pinch = await tester.createGesture(
+        kind: PointerDeviceKind.trackpad, pointer: 33);
+    await pinch.panZoomStart(const Offset(400, 300));
+    // The first, barely visible scale update already carries more than the
+    // pan-intent threshold of finger drift. It is nevertheless a pinch and
+    // must determine the intent for the complete gesture.
+    await pinch.panZoomUpdate(const Offset(400, 300),
+        pan: const Offset(0, -12), scale: 0.995);
+    await tester.pump();
+    await pinch.panZoomUpdate(const Offset(400, 300),
+        pan: const Offset(0, -24), scale: 0.8);
+    await tester.pump();
+    await pinch.panZoomEnd();
+    await tester.pumpAndSettle(const Duration(milliseconds: 300));
+
+    expect(controller.zoom, lessThan(initialZoom));
+    expect(scrollable.position.pixels, 0);
+    expect(controller.currentPage, 0);
+  });
+
   testWidgets('horizontal trackpad fling keeps panning while zoomed',
       (tester) async {
     final controller = await pumpViewer(tester);
@@ -887,6 +926,42 @@ void main() {
     controller.setZoom(24);
     await tester.pumpAndSettle(const Duration(milliseconds: 300));
     expect(controller.zoom, closeTo(24, 0.01));
+  });
+
+  testWidgets('controller zoom settles page rendering immediately',
+      (tester) async {
+    final controller = await pumpViewer(tester, pages: 1);
+    controller.setZoom(2);
+    await tester.pump();
+
+    final page = tester.widget<PdfPageView>(find.byType(PdfPageView));
+    expect(page.scale, greaterThan(1),
+        reason: 'a discrete controller command must not wait for the '
+            'gesture-only 200 ms quiet debounce');
+  });
+
+  testWidgets('controller layout zoom does not leave a delayed scroll settle',
+      (tester) async {
+    final controller = await pumpViewer(tester, pages: 3);
+    unawaited(controller.jumpToPage(1));
+    await tester.pumpAndSettle();
+
+    controller.setZoom(1);
+    await tester.pump();
+    final settled = tester
+        .widgetList<PdfPageView>(find.byType(PdfPageView))
+        .map((page) => page.settleGeneration)
+        .toList();
+
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(
+      tester
+          .widgetList<PdfPageView>(find.byType(PdfPageView))
+          .map((page) => page.settleGeneration),
+      orderedEquals(settled),
+      reason: 'a discrete zoom command must not repaint again after the '
+          'gesture-only 500 ms scroll quiet window',
+    );
   });
 
   testWidgets('tapping a URI link surfaces the action', (tester) async {
@@ -1103,6 +1178,19 @@ void main() {
     controller.jumpToPage(4);
     await tester.pumpAndSettle(const Duration(milliseconds: 300));
     expect(controller.currentPage, 4);
+  });
+
+  testWidgets('disposing during an animated page jump is safe', (tester) async {
+    final controller = await pumpViewer(tester);
+    // Page 1 is close enough to use ScrollController.animateTo rather than
+    // the far-jump shortcut. Remove the viewer before that future completes;
+    // its ScrollController has no positions when the continuation resumes.
+    unawaited(controller.jumpToPage(1));
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('page overlays sit at PDF coordinates and stay interactive',
@@ -1378,6 +1466,40 @@ void main() {
           reason: 'the viewer tracks the controller revision by itself');
     });
 
+    testWidgets('page deletion starts a fresh presentation generation',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final editing = PdfEditingController(buildMultiPagePdf(3));
+      addTearDown(editing.dispose);
+      final controller = PdfViewerController();
+      addTearDown(controller.dispose);
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: PdfViewer(
+            initialFit: PdfViewerFit.width,
+            editing: editing,
+            controller: controller,
+          ),
+        ),
+      ));
+      await tester.pump();
+      final oldNamespace = controller.debugTileCacheNamespace;
+      final oldEpoch = controller.pagePresentationEpoch;
+      final oldPageState = tester.state(find.byType(PdfPageView).first);
+
+      editing.removePage(0);
+      await tester.pump();
+
+      expect(controller.pageCount, 2);
+      expect(controller.pagePresentationEpoch, oldEpoch! + 1);
+      expect(controller.debugTileCacheNamespace, isNot(same(oldNamespace)),
+          reason: 'pre-delete tile completions must be unreachable');
+      expect(tester.state(find.byType(PdfPageView).first),
+          isNot(same(oldPageState)),
+          reason: 'a shifted page slot must not inherit native render state');
+    });
+
     testWidgets('a stale standalone document never desyncs the viewer',
         (tester) async {
       SharedPreferences.setMockInitialValues({});
@@ -1453,23 +1575,19 @@ void main() {
   group('contextMenuEnabled', () {
     test('defaults to true', () {
       expect(
-          PdfViewer(
-                  document: PdfDocument.open(buildMultiPagePdf(1)))
+          PdfViewer(document: PdfDocument.open(buildMultiPagePdf(1)))
               .contextMenuEnabled,
           isTrue);
     });
 
-    testWidgets(
-        'right-click on plain page text opens the text menu by default',
+    testWidgets('right-click on plain page text opens the text menu by default',
         (tester) async {
       final controller = await pumpViewer(tester, pages: 2);
       // 'Page 1' baseline at (72, 720), 24pt - mid-word of "Page"
-      await tester.tapAt(annotView(100, 720),
-          buttons: kSecondaryButton);
+      await tester.tapAt(annotView(100, 720), buttons: kSecondaryButton);
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('pdf-text-menu-copy')), findsOneWidget);
-      expect(
-          find.byKey(const ValueKey('pdf-text-menu-select-all')),
+      expect(find.byKey(const ValueKey('pdf-text-menu-select-all')),
           findsOneWidget);
       // dismiss the menu so the teardown of the viewer does not race it
       await tester.tapAt(const Offset(10, 10));
@@ -1494,13 +1612,11 @@ void main() {
       ));
       await tester.pump();
 
-      await tester.tapAt(annotView(100, 720),
-          buttons: kSecondaryButton);
+      await tester.tapAt(annotView(100, 720), buttons: kSecondaryButton);
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('pdf-text-menu-copy')), findsNothing);
       expect(
-          find.byKey(const ValueKey('pdf-text-menu-select-all')),
-          findsNothing);
+          find.byKey(const ValueKey('pdf-text-menu-select-all')), findsNothing);
     });
 
     testWidgets(
@@ -1521,8 +1637,7 @@ void main() {
       ));
       await tester.pump();
 
-      await tester.tapAt(annotView(100, 720),
-          buttons: kSecondaryButton);
+      await tester.tapAt(annotView(100, 720), buttons: kSecondaryButton);
       await tester.pumpAndSettle();
       expect(hostCalls, hasLength(1),
           reason: 'host callback fires exactly once per right-click');
@@ -1560,8 +1675,7 @@ void main() {
       ));
       await tester.pump();
 
-      await tester.tapAt(annotView(100, 720),
-          buttons: kSecondaryButton);
+      await tester.tapAt(annotView(100, 720), buttons: kSecondaryButton);
       await tester.pumpAndSettle();
       expect(hostCalls, 0,
           reason: 'host callback only fires when the default menu is off');
@@ -1612,8 +1726,8 @@ void main() {
       // The stock text menu and selection chip must not appear; the host
       // owns the popup.
       expect(find.byKey(const ValueKey('pdf-text-menu-copy')), findsNothing);
-      expect(find.byKey(const ValueKey('pdf-text-menu-select-all')),
-          findsNothing);
+      expect(
+          find.byKey(const ValueKey('pdf-text-menu-select-all')), findsNothing);
     });
 
     // 🔴 regression: the desktop takeover used to fire before the stock

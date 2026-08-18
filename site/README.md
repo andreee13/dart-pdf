@@ -10,6 +10,8 @@ up against the real product facts.
 - `index.html` is the landing page (hero, features, privacy band, download,
   developers, footer). Self-contained: only external dependency is the Manrope
   web font from Google Fonts.
+- `sdk.html` serves the canonical `/flutter-pdf-editor` developer landing page.
+  Firebase permanently redirects the old `/sdk` URL to it.
 - `privacy.html` is the privacy policy, mirroring `app/PRIVACY.md`. This is the
   URL to use for the App Store / Play Store "privacy policy" listing field.
 - `404.html` is the not-found page. Firebase Hosting serves it automatically
@@ -66,7 +68,7 @@ cd site && python3 -m http.server 8000   # → http://localhost:8000
 
 ## Deploy
 
-Hosted on the existing **`dart-pdf-demo`** Firebase project. Three sites now
+Hosted on the existing **`dart-pdf-demo`** Firebase project. Four sites now
 live under that project:
 
 | Site | `.web.app` | Custom domain | Serves |
@@ -74,6 +76,7 @@ live under that project:
 | `dart-pdf-demo` | `dart-pdf-demo.web.app` | none | the SDK demo (`packages/dart_pdf_editor/example`) |
 | `dartpdf` | `dartpdf.web.app` | `dart-pdf.com`, `www.dart-pdf.com` | this landing page (`site/`) |
 | `dartpdf-app` | `dartpdf-app.web.app` | `app.dart-pdf.com` | the DartPDF web app (`app/`, `flutter build web`) |
+| `dartpdf-flatpak` | `dartpdf-flatpak.web.app` | none | the signed Flatpak repository (`flatpak-hosting/`) |
 
 Deploy the landing page:
 
@@ -88,6 +91,11 @@ Deploy the web app (after `cd app && fvm flutter build web --release`):
 cd app
 firebase deploy --only hosting:dartpdf-app --project dart-pdf-demo
 ```
+
+The Flatpak repository is published by
+`.github/workflows/publish-flatpak.yml`; do not deploy `flatpak-hosting/`
+from an empty `public/` directory. See
+[`flatpak-hosting/README.md`](../flatpak-hosting/README.md).
 
 Custom domains were wired via the Firebase Hosting `customDomains` REST API
 against Namecheap DNS (apex A `199.36.158.100` + `hosting-site=dartpdf` TXT;

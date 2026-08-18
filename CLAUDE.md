@@ -2,7 +2,7 @@
 
 Monorepo using **pub workspaces** (root `pubspec.yaml` lists members under
 `packages/`). Flutter is managed with **fvm** (see `.fvmrc`); use
-`fvm flutter` / `fvm dart`, or the binaries in `~/fvm/versions/3.44.8/bin/`.
+`fvm flutter` / `fvm dart`, or the binaries in `~/fvm/versions/3.47.0/bin/`.
 
 ## Commands
 
@@ -87,7 +87,13 @@ policy live on the handler, shared with the loader's `decryptObjectGraph`);
 signing encrypted files stays refused). Annotation authoring is in:
 `PdfEditor` creates highlights/ink/shapes/free text/notes/stamps with
 generated appearance streams (`annotation_editor.dart`) and can flatten
-them into page content. AcroForm support is in: `PdfAcroForm`/`PdfFormField`
+them into page content. A template stamp records its design - unresolved,
+so `{{date}}` stays live - as private metadata (`DartPdfStampTemplate` →
+`PdfAnnotation.stampTemplate`, skipped past
+`maxStampTemplateMetadataBytes`), which is how the editor's right-click
+"Save to stamps" (`customStampOf` / `saveSelectedAsCustomStamp`) puts a
+placed stamp back into the collection; see
+doc/dev-log/2026-08-06-save-stamp-from-page.md. AcroForm support is in: `PdfAcroForm`/`PdfFormField`
 model (`form.dart`) plus filling with regenerated appearances
 (`form_editor.dart` - text/checkbox/radio/choice, auto-size, quadding).
 Page manipulation is in (`page_editor.dart`): reorder/move/remove flatten
@@ -233,6 +239,20 @@ guessed - see doc/dev-log/2026-07-16-image-cache-budget.md and
 `test/benchmark_image_cache_budget_test.dart`; re-run it before changing
 them. `didHaveMemoryPressure` on the viewer clears the image + preview
 caches.
+An optional **persistent tier for exact full-resolution page rasters** is in
+(`PdfRasterCache(fullRasters:)`, host opt-in): a separate `PdfDiskCache` with
+its own namespace and byte budget, so page rasters can never evict the small
+preview/thumbnail tier. Keyed by document + `fullRasterVersion` + page +
+content revision + physical WxH + rotation + paper colour + annotations, with
+a `PRAS` header so corruption is a miss. Stores are queued clones drained
+behind `PdfPagePreviewCache.deferBackgroundIo` (the viewer wires it to the
+motion hold); loads run in `_render()` between the in-memory restore and the
+scheduled render, and are admitted through `PdfPageRasterCachePolicy` (an
+oversize hit still paints the page, it just isn't retained). Unbound for
+editing sessions, exactly like previews and the text cache. Counters live on
+`PdfRasterCacheStats` + `PdfDiskCache.debugStats`; codec trade-offs in
+`test/benchmark_full_raster_disk_test.dart` and
+doc/dev-log/2026-07-29-persistent-full-raster-disk-tier.md.
 Exact page rasters live in `PdfPagePreviewCache`'s second LRU, keyed by
 `(page, PdfPageRasterSignature)` - index + physical size + paper colour +
 annotation visibility + rotation, with the revision checked by `PdfPage`
@@ -321,6 +341,15 @@ size slider (`thumbnailViewTileWidth` pref), custom drag reorder
 onActivatePage`). `PdfEditorView` overlays it over the live viewer as a
 view mode (`showThumbnailView`, toggled from View options alongside
 reflow; `altView` = reflow-or-grid suppresses the panels/toolbar).
+Both panels take an external PDF **dropped between two tiles**:
+`PdfThumbnailDropController` (editing_thumbnail_drop.dart) is the seam -
+panels register a global-position→slot resolver and paint the insertion
+marker, the host (which owns the platform drag stream) drives
+`dragOver`/`indexAt`/`endDrag` and inserts at the returned index.
+`PdfEditorView(thumbnailDropController:)` forwards it; the app wires it
+to its `desktop_drop` `DropTarget`, so a positioned drop skips the
+open-or-insert dialog. See
+doc/dev-log/2026-08-06-thumbnail-file-drop-position.md.
 
 ## Development session log
 

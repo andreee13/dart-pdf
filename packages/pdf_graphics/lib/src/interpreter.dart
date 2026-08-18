@@ -206,6 +206,7 @@ class PdfInterpreter {
       required this.device,
       bool scanImagesOnly = false,
       this.resolveOverprint = true,
+      this.collectCharOffsets = false,
       this.cancellation})
       : _scanImagesOnly = scanImagesOnly,
         _scanImages = scanImagesOnly;
@@ -231,6 +232,21 @@ class PdfInterpreter {
   /// colour (text extraction, the image-collect scan), which would only pay
   /// for the buffer.
   final bool resolveOverprint;
+
+  /// Whether to fill in [PdfTextRun.charOffsets] - the em-space pen position
+  /// of every character boundary in a run (issue #647) - for *every* run.
+  ///
+  /// On for text extraction, which needs exact intra-run geometry to land a
+  /// selection or search highlight on the glyphs of a proportional font.
+  /// Painting walks leave it off: an embedded font already carries those
+  /// positions in [PdfTextRun.glyphs], so the list would be paid for nothing.
+  ///
+  /// Runs with **no** embedded font program get the table regardless of this
+  /// flag (issue #649): the device substitutes a system font there, and
+  /// without the PDF's own per-character advances it can only match the run
+  /// total, letting interior glyphs drift by several points against the
+  /// geometry that selection, search, and hit-testing use.
+  final bool collectCharOffsets;
 
   /// Process-wide kill switch for the colorant-buffer overprint path
   /// (issue #502). Off, overprint state is still parsed and delivered but no
@@ -352,7 +368,7 @@ class PdfInterpreter {
   PdfRect? _pageBox;
 
   // current path, built in page space
-  List<PdfPathSegment> _segments = [];
+  PdfPathBuilder _segments = PdfPathBuilder();
   double _currentX = 0, _currentY = 0; // user-space current point
   double _startX = 0, _startY = 0;
   PdfFillRule? _pendingClip;
@@ -485,7 +501,8 @@ class PdfInterpreter {
     // Expressed through the resumable walk so the two share one implementation
     // - this path is exercised by the whole corpus, which is what keeps the
     // chunked form honest.
-    final walk = beginPageContent(page, content, operationLimit: operationLimit);
+    final walk =
+        beginPageContent(page, content, operationLimit: operationLimit);
     await walk.advance(yieldInterval: yieldInterval);
   }
 
@@ -678,8 +695,7 @@ class PdfInterpreter {
     final rect = annotation.calloutBox ?? annotation.rect;
     if (rect.width <= 0 || rect.height <= 0) return;
     final da = cos.resolve(annotation.dict['DA']);
-    final style =
-        _parseDefaultAppearance(da is CosString ? da.text : '');
+    final style = _parseDefaultAppearance(da is CosString ? da.text : '');
     final size = style.size;
     const pad = 2.0;
     final lineHeight = size * 1.15;
@@ -705,8 +721,7 @@ class PdfInterpreter {
       device.strokePath(
           PdfPath([
             PdfMoveTo(callout.first.$1, callout.first.$2),
-            for (final point in callout.skip(1))
-              PdfLineTo(point.$1, point.$2),
+            for (final point in callout.skip(1)) PdfLineTo(point.$1, point.$2),
           ]),
           _pdfColor(freeText?.borderColor ?? annotation.color ?? 0x000000),
           _annotationStroke(annotation),
@@ -913,9 +928,12 @@ class PdfInterpreter {
     }
   }
 
-  ({String fontName, double size, PdfColor color})
-      _parseWidgetDefaultAppearance(PdfWidgetAnnotation annotation) =>
-          _parseDefaultAppearance(_widgetDefaultAppearance(annotation) ?? '');
+  ({
+    String fontName,
+    double size,
+    PdfColor color
+  }) _parseWidgetDefaultAppearance(PdfWidgetAnnotation annotation) =>
+      _parseDefaultAppearance(_widgetDefaultAppearance(annotation) ?? '');
 
   /// Parses a /DA default-appearance string (§12.7.3.3) into the font name,
   /// size and colour it selects - the shared core behind text-field widgets
@@ -1418,6 +1436,65 @@ class PdfInterpreter {
   }
 
   void _execOp(ContentOperation op, CosDictionary resources, int formDepth) {
+    final numbers = op.numberOperands;
+    if (numbers != null) {
+      // The incremental parser leaves number-only instructions unboxed. Keep
+      // the dominant CAD path on primitive numbers all the way into path
+      // construction: this avoids millions of short-lived CosReal objects and
+      // their repeated runtime type checks. Programmatically-created
+      // ContentOperations retain the general COS-object switch below.
+      switch (op.operator) {
+        case 'm':
+          _moveTo(_number(numbers, 0), _number(numbers, 1));
+          return;
+        case 'l':
+          _lineTo(_number(numbers, 0), _number(numbers, 1));
+          return;
+        case 'c':
+          _curveTo(
+            _number(numbers, 0),
+            _number(numbers, 1),
+            _number(numbers, 2),
+            _number(numbers, 3),
+            _number(numbers, 4),
+            _number(numbers, 5),
+          );
+          return;
+        case 'v':
+          _curveTo(
+            _currentX,
+            _currentY,
+            _number(numbers, 0),
+            _number(numbers, 1),
+            _number(numbers, 2),
+            _number(numbers, 3),
+          );
+          return;
+        case 'y':
+          final x2 = _number(numbers, 2), y2 = _number(numbers, 3);
+          _curveTo(_number(numbers, 0), _number(numbers, 1), x2, y2, x2, y2);
+          return;
+        case 're':
+          final x = _number(numbers, 0), y = _number(numbers, 1);
+          final w = _number(numbers, 2), h = _number(numbers, 3);
+          _moveTo(x, y);
+          _lineTo(x + w, y);
+          _lineTo(x + w, y + h);
+          _lineTo(x, y + h);
+          _closePath();
+          return;
+        case 'cm':
+          _state.ctm = PdfMatrix(
+            _number(numbers, 0),
+            _number(numbers, 1),
+            _number(numbers, 2),
+            _number(numbers, 3),
+            _number(numbers, 4),
+            _number(numbers, 5),
+          ).concat(_state.ctm);
+          return;
+      }
+    }
     final o = op.operands;
     // A `d1` Type3 glyph forbids colour operators (§9.6.5): the glyph paints
     // in the text colour that invoked it. The flag is false on every ordinary
@@ -1563,14 +1640,12 @@ class PdfInterpreter {
         // but not yet given components must not keep the previous space's
         // colorant reading (a stale one would overprint the wrong channels).
         _state.fillInk = null;
-        _state.fillSpace = PdfColorSpace.parse(
-            cos, o.isEmpty ? null : o[0],
+        _state.fillSpace = PdfColorSpace.parse(cos, o.isEmpty ? null : o[0],
             resources: resources, iccCache: _iccCache);
       case 'CS':
         if (_scanImages) break;
         _state.strokeInk = null;
-        _state.strokeSpace = PdfColorSpace.parse(
-            cos, o.isEmpty ? null : o[0],
+        _state.strokeSpace = PdfColorSpace.parse(cos, o.isEmpty ? null : o[0],
             resources: resources, iccCache: _iccCache);
       case 'sc' || 'scn':
         // The fill pattern is tracked even while scanning - a tiling pattern
@@ -1896,11 +1971,12 @@ class PdfInterpreter {
     _currentX = _startX = x;
     _currentY = _startY = y;
     final m = _state.ctm;
-    final px = m.transformX(x, y), py = m.transformY(x, y);
+    final px = m.a * x + m.c * y + m.e;
+    final py = m.b * x + m.d * y + m.f;
     if (_scanImages) {
       _scanPoint(px, py);
     } else {
-      _segments.add(PdfMoveTo(px, py));
+      _segments.moveTo(px, py);
     }
   }
 
@@ -1908,41 +1984,41 @@ class PdfInterpreter {
     _currentX = x;
     _currentY = y;
     final m = _state.ctm;
-    final px = m.transformX(x, y), py = m.transformY(x, y);
+    final px = m.a * x + m.c * y + m.e;
+    final py = m.b * x + m.d * y + m.f;
     if (_scanImages) {
       _scanPoint(px, py);
     } else {
-      _segments.add(PdfLineTo(px, py));
+      _segments.lineTo(px, py);
     }
   }
 
   void _curveTo(
       double x1, double y1, double x2, double y2, double x3, double y3) {
     final m = _state.ctm;
+    final px1 = m.a * x1 + m.c * y1 + m.e;
+    final py1 = m.b * x1 + m.d * y1 + m.f;
+    final px2 = m.a * x2 + m.c * y2 + m.e;
+    final py2 = m.b * x2 + m.d * y2 + m.f;
+    final px3 = m.a * x3 + m.c * y3 + m.e;
+    final py3 = m.b * x3 + m.d * y3 + m.f;
     if (_scanImages) {
       // The Bézier hull (control points included) bounds the curve.
-      _scanPoint(m.transformX(x1, y1), m.transformY(x1, y1));
-      _scanPoint(m.transformX(x2, y2), m.transformY(x2, y2));
-      _scanPoint(m.transformX(x3, y3), m.transformY(x3, y3));
+      _scanPoint(px1, py1);
+      _scanPoint(px2, py2);
+      _scanPoint(px3, py3);
       _currentX = x3;
       _currentY = y3;
       return;
     }
-    _segments.add(PdfCubicTo(
-      m.transformX(x1, y1),
-      m.transformY(x1, y1),
-      m.transformX(x2, y2),
-      m.transformY(x2, y2),
-      m.transformX(x3, y3),
-      m.transformY(x3, y3),
-    ));
+    _segments.cubicTo(px1, py1, px2, py2, px3, py3);
     _currentX = x3;
     _currentY = y3;
   }
 
   void _closePath() {
     // In scan mode the box already covers every point; nothing to add.
-    if (!_scanImages) _segments.add(const PdfClosePath());
+    if (!_scanImages) _segments.close();
     _currentX = _startX;
     _currentY = _startY;
   }
@@ -2075,14 +2151,13 @@ class PdfInterpreter {
       _resetScanBox();
       return;
     }
-    final path = PdfPath(_segments);
+    final path = _segments.takePath();
     // Reset the builder *before* dispatching: a pattern fill below re-enters
     // the interpreter to run the pattern's cell content, and with the live
     // list still installed the cell's first path ops would append into this
     // already-captured path - the outer region's geometry then leaked into
     // the first tile's paint (and, once cells are recorded and replayed for
     // #524, into every tile).
-    _segments = [];
     final overprint = _overprint;
     if (!path.isEmpty && _contentVisible) {
       if (fill != null) {
@@ -2097,8 +2172,8 @@ class PdfInterpreter {
               opaque: _opaquePaint(_state.fillAlpha));
           _deliverOverprint(_state.fillOverprint && resolved == null,
               _state.strokeOverprint, _state.overprintMode);
-          device.fillPath(path, resolved ?? _state.fillColor, fill,
-              _state.fillAlpha);
+          device.fillPath(
+              path, resolved ?? _state.fillColor, fill, _state.fillAlpha);
         }
       }
       if (stroke) {
@@ -2129,7 +2204,7 @@ class PdfInterpreter {
       }
     }
     _pendingClip = null;
-    _segments = [];
+    _segments.clear();
   }
 
   // ---------- color ----------
@@ -2174,8 +2249,8 @@ class PdfInterpreter {
     if (_state.fillOverprint != beforeFill ||
         _state.strokeOverprint != beforeStroke ||
         _state.overprintMode != beforeMode) {
-      _deliverOverprint(_state.fillOverprint, _state.strokeOverprint,
-          _state.overprintMode);
+      _deliverOverprint(
+          _state.fillOverprint, _state.strokeOverprint, _state.overprintMode);
     }
   }
 
@@ -2378,6 +2453,20 @@ class PdfInterpreter {
     // along y by the vertical displacement, and each glyph is shifted by its
     // position vector so the column centres on the baseline.
     final vertical = font.isVertical;
+    // Per-character pen positions for text extraction (issue #647) and for
+    // painting substituted text (issue #649 - a device with no embedded font
+    // program has no other source for the PDF's intra-run distribution, so
+    // those runs get the table whether or not the caller asked for it; a
+    // glyph list already carries the same offsets). Only horizontal text has a
+    // meaningful x offset per character; vertical runs advance along y and
+    // leave this null.
+    final charOffsets = (collectCharOffsets || glyphs == null) &&
+            !vertical &&
+            !_scanImages &&
+            emScale != 0
+        ? <double>[]
+        : null;
+    var lastOffset = 0.0; // tail of charOffsets, kept out of the list
     final hScale = _state.horizontalScale == 0 ? 1.0 : _state.horizontalScale;
     var advance = 0.0; // text-space along the writing direction (x or y)
     // Pen advance bracketing the visible (non-whitespace) glyphs: [leadingAdv]
@@ -2425,6 +2514,7 @@ class PdfInterpreter {
           size != 0) {
         _drawType3Glyph(font, code, advance);
       }
+      final advanceBefore = advance;
       if (vertical) {
         // Tc applies along the writing direction; Tw only to single-byte 0x20.
         advance += font.verticalAdvanceOf(code) * size + _state.charSpacing;
@@ -2433,8 +2523,31 @@ class PdfInterpreter {
         if (!font.isCid && code == 0x20) tx += _state.wordSpacing;
         advance += tx * _state.horizontalScale;
       }
+      if (charOffsets != null && text.isNotEmpty) {
+        // Consumers binary-search these, so keep them non-decreasing: a
+        // pathological negative Tc can tighten past a glyph's own width and
+        // walk the pen backwards. `lastOffset` tracks the tail in a local -
+        // this runs once per glyph, so avoid re-reading charOffsets.last.
+        final start = math.max(advanceBefore / emScale, lastOffset);
+        if (text.length == 1) {
+          charOffsets.add(start);
+          lastOffset = start;
+        } else {
+          // One code can map to several characters through /ToUnicode (a
+          // ligature). The PDF positions the code, not its pieces, so split
+          // the advance evenly across them.
+          final end = math.max(advance / emScale, start);
+          final step = (end - start) / text.length;
+          for (var i = 0; i < text.length; i++) {
+            charOffsets.add(start + step * i);
+          }
+          lastOffset = start + step * (text.length - 1);
+        }
+      }
       if (visible) visibleAdvance = advance;
     }
+    // Closing boundary, so charOffsets always has text.length + 1 entries.
+    charOffsets?.add(math.max(advance / emScale, lastOffset));
 
     if (size != 0 && _contentVisible && !_scanImages) {
       // text rendering matrix: em space → page space (§9.4.4).
@@ -2465,6 +2578,10 @@ class PdfInterpreter {
         }
       }
 
+      assert(
+          charOffsets == null || charOffsets.length == text.length + 1,
+          'charOffsets must have one entry per character plus the closing '
+          'boundary (${charOffsets.length} vs ${text.length + 1})');
       if (text.trim().isNotEmpty || glyphs != null) {
         final fillText = mode == 0 || mode == 2 || mode == 4 || mode == 6;
         final strokeText = mode == 1 || mode == 2 || mode == 5 || mode == 6;
@@ -2517,6 +2634,13 @@ class PdfInterpreter {
           fill: embedded ? true : doFill,
           strokeColor: !embedded && strokeText ? _state.strokeColor : null,
           strokeWidth: _state.stroke.width * k, // see strokePath: 0 stays 0
+          // Embedded stroke-only text is historically approximated by
+          // filling the real outline in the stroke colour; carry the matching
+          // stroking alpha with that approximation too.
+          fillAlpha: embedded && (mode == 1 || mode == 5)
+              ? _state.strokeAlpha
+              : _state.fillAlpha,
+          strokeAlpha: _state.strokeAlpha,
           gradient: (embedded ? fillText : doFill)
               ? _gradientOfPattern(pattern)
               : null,
@@ -2529,11 +2653,11 @@ class PdfInterpreter {
           // carries size and Th, so normalise to em (divide by size) - Th
           // cancels. Tw never applies to composite fonts (§9.3.3).
           letterSpacing: size == 0 ? 0 : _state.charSpacing / size,
-          wordSpacing:
-              size == 0 || font.isCid ? 0 : _state.wordSpacing / size,
+          wordSpacing: size == 0 || font.isCid ? 0 : _state.wordSpacing / size,
           fontName: font.baseFont,
           fontSize: size,
           glyphs: glyphs,
+          charOffsets: charOffsets,
           invisible: mode == 3 || mode == 7 || paintedAsTiling,
           mcid: _currentMcid,
         ));
@@ -2568,8 +2692,8 @@ class PdfInterpreter {
     final width = emScale == 0 ? 0.0 : advance / emScale;
     final box = PdfPath([
       PdfMoveTo(transform.transformX(0, -0.25), transform.transformY(0, -0.25)),
-      PdfLineTo(
-          transform.transformX(width, -0.25), transform.transformY(width, -0.25)),
+      PdfLineTo(transform.transformX(width, -0.25),
+          transform.transformY(width, -0.25)),
       PdfLineTo(transform.transformX(width, 1), transform.transformY(width, 1)),
       PdfLineTo(transform.transformX(0, 1), transform.transformY(0, 1)),
       const PdfClosePath(),
@@ -2649,8 +2773,8 @@ class PdfInterpreter {
       code,
       decode: (proc) {
         try {
-          return _opsCache.putIfAbsent(
-              proc, () => ContentStreamParser.parse(cos.decodeStreamData(proc)));
+          return _opsCache.putIfAbsent(proc,
+              () => ContentStreamParser.parse(cos.decodeStreamData(proc)));
         } on Exception {
           return const [];
         }
@@ -2702,9 +2826,7 @@ class PdfInterpreter {
             final sink = device;
             if (sink is PdfTiledCellSink) {
               (sink as PdfTiledCellSink).drawTiledCell(PdfDrawTiledCellCommand(
-                  cell.$1,
-                  Float64List(1)..[0] = dx,
-                  Float64List(1)..[0] = dy));
+                  cell.$1, Float64List(1)..[0] = dx, Float64List(1)..[0] = dy));
             } else if (dx == 0 && dy == 0) {
               replayCommands(cell.$1, device);
             } else {
@@ -2744,7 +2866,7 @@ class PdfInterpreter {
     final savedClipPending = _textClipPending;
     final savedClipSegments = List.of(_textClipSegments);
     final savedSegments = _segments;
-    _segments = [];
+    _segments = PdfPathBuilder();
     // A `d1` inside this CharProc locks colour to the text colour; the lock
     // is per-glyph, so snapshot and clear it (a nested glyph mustn't inherit
     // an outer glyph's lock) and restore it afterwards. The glyph's effective
@@ -3093,8 +3215,14 @@ class PdfInterpreter {
   /// the tile's transform, §8.7.3.1 BBox clip, the cell content, and any
   /// pending soft-mask finalize - through whatever [device] currently is
   /// (the real target for direct tiles, a recorder for the #524 capture).
-  void _runPatternCell(List<ContentOperation> ops, CosDictionary resources,
-      List<double> bbox, PdfMatrix matrix, int i, int j, double xStep,
+  void _runPatternCell(
+      List<ContentOperation> ops,
+      CosDictionary resources,
+      List<double> bbox,
+      PdfMatrix matrix,
+      int i,
+      int j,
+      double xStep,
       double yStep,
       {PdfColor? patternColor}) {
     _state = _GraphicsState()
@@ -3108,7 +3236,7 @@ class PdfInterpreter {
     // builds next (and the enclosing region's captured path must never grow
     // under a recorded cell - see _paintPath's early reset).
     final savedSegments = _segments;
-    _segments = [];
+    _segments = PdfPathBuilder();
     _overprint?.save();
     device.save();
     try {
@@ -3443,8 +3571,8 @@ class PdfInterpreter {
   /// read as DeviceCMYK by operand count for the colour, so the colorants must
   /// come from the same reading - otherwise the paint looks colorant-less and
   /// an overprint over it falls back to the approximation.
-  static PdfInkColorants? _resolveInk(PdfColorSpace space,
-      List<CosObject> operands, PdfInkColorants? current) {
+  static PdfInkColorants? _resolveInk(
+      PdfColorSpace space, List<CosObject> operands, PdfInkColorants? current) {
     final values = [
       for (final item in operands)
         if (item is CosInteger || item is CosReal) _numOf(item),
@@ -3484,6 +3612,9 @@ class PdfInterpreter {
 
   static double _num(List<CosObject> operands, int index) =>
       index < operands.length ? _numOf(operands[index]) : 0;
+
+  static double _number(List<num> operands, int index) =>
+      index < operands.length ? operands[index].toDouble() : 0;
 
   static PdfMatrix _matrixFrom(List<CosObject> o) => PdfMatrix(
       _num(o, 0), _num(o, 1), _num(o, 2), _num(o, 3), _num(o, 4), _num(o, 5));

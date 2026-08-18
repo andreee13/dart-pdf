@@ -13,6 +13,7 @@ import 'package:pdf_document/pdf_document.dart'
         PdfTextAlign,
         PdfTextFont;
 
+import '../dialog.dart';
 import '../l10n/pdf_l10n.dart';
 import '../pdf_viewer.dart';
 import '../toast.dart';
@@ -1109,7 +1110,7 @@ class _PdfEditingToolbarState extends State<PdfEditingToolbar> {
   }
 
   Future<void> _applyRedactions(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
+    final confirmed = await showPdfDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         key: const ValueKey('pdf-redaction-confirm'),
@@ -1857,6 +1858,9 @@ class _PdfEditingToolbarState extends State<PdfEditingToolbar> {
   List<Widget> _colorCluster(BuildContext context) {
     if (!widget.showColor) return const [];
     final scheme = Theme.of(context).colorScheme;
+    // with a restylable selection the swatches show - and change - its
+    // colour; otherwise the creation default
+    final current = controller.displayColor;
     return [
       for (final color in widget.palette)
         Padding(
@@ -1871,10 +1875,8 @@ class _PdfEditingToolbarState extends State<PdfEditingToolbar> {
                 color: color,
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: controller.color == color
-                      ? scheme.primary
-                      : scheme.outline,
-                  width: controller.color == color ? 3 : 1,
+                  color: current == color ? scheme.primary : scheme.outline,
+                  width: current == color ? 3 : 1,
                 ),
               ),
             ),
@@ -1891,16 +1893,16 @@ class _PdfEditingToolbarState extends State<PdfEditingToolbar> {
             child: InkWell(
               customBorder: const CircleBorder(),
               onTap: () async {
-                final picked = await pickEditingColor(context, controller,
-                    initial: controller.color);
+                final picked =
+                    await pickEditingColor(context, controller, initial: current);
                 if (picked != null) _applyColor(picked);
               },
               child: SizedBox(
                 width: 40,
                 height: 40,
                 child: Center(
-                  child: Icon(Icons.palette_outlined,
-                      color: controller.color, size: 20),
+                  child:
+                      Icon(Icons.palette_outlined, color: current, size: 20),
                 ),
               ),
             ),
@@ -2346,6 +2348,7 @@ class _PdfEditingToolbarState extends State<PdfEditingToolbar> {
   /// The first [count] palette swatches, sized for the mobile dock.
   List<Widget> _mobileSwatches(BuildContext context, {int count = 3}) {
     final scheme = Theme.of(context).colorScheme;
+    final current = controller.displayColor;
     var i = 0;
     return [
       for (final color in widget.palette.take(count))
@@ -2362,10 +2365,8 @@ class _PdfEditingToolbarState extends State<PdfEditingToolbar> {
                 color: color,
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: controller.color == color
-                      ? scheme.primary
-                      : scheme.outline,
-                  width: controller.color == color ? 3 : 1,
+                  color: current == color ? scheme.primary : scheme.outline,
+                  width: current == color ? 3 : 1,
                 ),
               ),
             ),
@@ -3522,9 +3523,7 @@ class _StyleMenuState extends State<_StyleMenu> {
                 : controller.preferences.shapeFillColor;
             // shape/cloud/line outline: a selected shape shows its own /C,
             // else the creation default
-            final strokeColorValue = restylingAnnotation
-                ? (annotationStyle?.color ?? controller.color)
-                : controller.color;
+            final strokeColorValue = controller.displayColor;
             return Container(
               width: 300,
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),

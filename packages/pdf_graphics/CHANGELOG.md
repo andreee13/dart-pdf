@@ -1,5 +1,45 @@
 # Changelog
 
+## 3.6.0
+
+- Carry nonstroking and stroking alpha on `PdfTextRun` through interpretation,
+  translation, and render-command serialization so text annotation opacity is
+  preserved by every renderer.
+
+## 3.5.1
+
+- Decode JBIG2 and JPEG 2000 data through image mask and soft-mask paths so
+  scanned MRC pages retain their text, background, and transparency layers.
+
+## 3.5.0
+
+- Add compact path traversal and replay primitives used by retained and tiled
+  renderers, including exact clip-stack preservation and bounded region replay.
+- Add batched text-device delivery and richer render-command serialization so
+  worker and retained-scene renderers can reduce per-command overhead without
+  changing page geometry.
+- Improve display-resolution image decoding, downsampling, masks, and decoded
+  image reuse for large scan and CAD workloads.
+
+## 3.4.0
+
+- Add exact per-character pen offsets to `PdfTextRun` and
+  `PdfExtractedRun`. Selection, search highlights, and hit testing now follow
+  proportional glyph widths instead of interpolating evenly across a run
+  (#647, #648).
+- Carry those offsets through render-command and text-cache serialization so
+  worker rendering and cached extraction preserve identical text geometry.
+
+## 3.3.1
+
+- Lockstep patch release to align the dart-pdf package suite at 3.3.1. No
+  public `pdf_graphics` API changes since 3.3.0.
+
+## 3.3.0
+
+- Lockstep minor release to align the dart-pdf package suite at 3.3.0. No
+  public `pdf_graphics` API changes since 3.2.0.
+
 ## 3.2.0
 
 - Render third-party FreeText annotations without appearance streams more

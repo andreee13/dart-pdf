@@ -67,10 +67,13 @@ class PdfTextRun {
     this.fontName,
     this.fontSize = 0,
     this.glyphs,
+    this.charOffsets,
     this.invisible = false,
     this.fill = true,
     this.strokeColor,
     this.strokeWidth = 0,
+    this.fillAlpha = 1,
+    this.strokeAlpha = 1,
     this.letterSpacing = 0,
     this.wordSpacing = 0,
     this.visibleWidth,
@@ -97,6 +100,12 @@ class PdfTextRun {
   /// Stroke line width in page space (the current line width mapped through
   /// the CTM, like every other stroke); 0 means the thinnest renderable line.
   final double strokeWidth;
+
+  /// Nonstroking opacity (`ca`) in effect for the filled glyphs.
+  final double fillAlpha;
+
+  /// Stroking opacity (`CA`) in effect for the outlined glyphs.
+  final double strokeAlpha;
 
   /// Render mode 3 (§9.4.3): the run paints nothing but still occupies
   /// its geometry - the OCR text layer of scanned documents. Painting
@@ -169,6 +178,21 @@ class PdfTextRun {
   /// should prefer these over substituted text rendering.
   final List<PdfGlyphPlacement>? glyphs;
 
+  /// Em-space pen offset of every character boundary in [text] - entry `i` is
+  /// the advance from the run origin to the start of `text[i]`, and the last
+  /// entry (index `text.length`) is [width]. Always ascending.
+  ///
+  /// Unlike [glyphs] this is populated for substituted fonts too (it needs
+  /// only the metrics, not outlines), so consumers get exact intra-run
+  /// geometry for any horizontal run. A character code that maps to several
+  /// characters (a ligature through /ToUnicode) splits its advance evenly
+  /// across them, since the PDF exposes no finer position.
+  ///
+  /// Null unless the interpreter was built with `collectCharOffsets`, and
+  /// null for vertical writing mode, where the pen advances along y. Callers
+  /// must fall back to interpolating across [width] when it is absent.
+  final List<double>? charOffsets;
+
   bool get hasOutlines =>
       glyphs != null && glyphs!.any((g) => g.outline != null);
 }
@@ -176,17 +200,30 @@ class PdfTextRun {
 /// An image draw request. Decoding is left to the device, which may have
 /// platform codecs (and may need to be async - devices can pre-collect).
 class PdfImageRequest {
-  const PdfImageRequest({
+  PdfImageRequest({
     required this.stream,
     required this.transform,
     this.alpha = 1,
     this.isStencil = false,
     this.stencilColor = PdfColor.black,
     this.isInline = false,
-    this.decoded,
-  });
+    PdfDecodedPixels? decoded,
+    this.sourceReference,
+  })  : _decoded = decoded,
+        decodedWidth = decoded?.width,
+        decodedHeight = decoded?.height;
 
   final CosStream stream;
+
+  /// Indirect object identity for a worker command that deliberately omitted
+  /// the stream bytes. The consumer resolves this against its copy of the same
+  /// document revision before decoding. Null for ordinary interpreter draws,
+  /// direct streams, inline images, and legacy command buffers.
+  ///
+  /// Keeping this on the request (rather than a renderer-specific side table)
+  /// preserves the portable command model while avoiding repeated copies of a
+  /// multi-megabyte JPEG/SMask subgraph across the worker boundary.
+  final CosReference? sourceReference;
 
   /// Premultiplied RGBA pixels decoded off-thread by a [PdfRenderWorker] and
   /// carried back with the recorded command, or null when this image is to be
@@ -195,7 +232,27 @@ class PdfImageRequest {
   /// pure-Dart decode - the point of the worker's image-decode offload. The
   /// [stream] is still serialized so the decoded pixels cache by content like
   /// every other render path.
-  final PdfDecodedPixels? decoded;
+  PdfDecodedPixels? _decoded;
+
+  /// Worker-decoded pixels that have not yet been handed off to an engine
+  /// image. A retained-scene consumer may release this CPU payload after the
+  /// corresponding engine image is live; the source stream/reference remains
+  /// available for a later cache miss to decode again.
+  PdfDecodedPixels? get decoded => _decoded;
+
+  /// Dimensions of the worker payload, retained after [releaseDecodedPixels]
+  /// so inline-image cache identity does not change during the handoff.
+  final int? decodedWidth;
+  final int? decodedHeight;
+
+  /// Releases the worker's CPU-side RGBA payload after an engine image has
+  /// successfully adopted the same pixels.
+  ///
+  /// Render-command buffers deliberately share their request objects with the
+  /// worker-record cache. Clearing here therefore also stops a large decoded
+  /// image view from pinning the whole transferred command buffer. Rendering
+  /// remains reproducible from [stream] or [sourceReference].
+  void releaseDecodedPixels() => _decoded = null;
 
   /// True for inline images (`BI .. ID .. EI`). Their [stream] is
   /// synthesized fresh on every interpretation pass, so consumers that
@@ -271,7 +328,8 @@ abstract interface class PdfDevice {
   /// approximation cannot act on its zero-component distinction, which is a
   /// colorant-space question the buffer has already answered. Non-compositing
   /// devices can ignore all three.
-  void setOverprint({required bool fill, required bool stroke, required int mode});
+  void setOverprint(
+      {required bool fill, required bool stroke, required int mode});
 
   /// Brackets a transparency-group form (§11.6.6) whose composite result
   /// paints at [alpha]. Inside the group, alpha starts over at 1.0; the

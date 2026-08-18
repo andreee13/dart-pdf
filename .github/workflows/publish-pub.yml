@@ -19,7 +19,9 @@ on:
       - 'pdf_test_fixtures-v*'
       - 'pdf_document-v*'
       - 'pdf_graphics-v*'
+      - 'dart_pdf_cli-v*'
       - 'dart_pdf_editor-v*'
+      - 'dart_pdf_editor_flutter_gpu-v*'
       - 'dart_pdf_editor_assets-v*'
       - 'pdf_ocr_vlm-v*'
       - 'pdf_ocr_ondevice-v*'
@@ -78,10 +80,20 @@ jobs:
               directory="packages/pdf_graphics"
               version="${tag#pdf_graphics-v}"
               ;;
+            dart_pdf_cli-v*)
+              package="dart_pdf_cli"
+              directory="packages/dart_pdf_cli"
+              version="${tag#dart_pdf_cli-v}"
+              ;;
             dart_pdf_editor-v*)
               package="dart_pdf_editor"
               directory="packages/dart_pdf_editor"
               version="${tag#dart_pdf_editor-v}"
+              ;;
+            dart_pdf_editor_flutter_gpu-v*)
+              package="dart_pdf_editor_flutter_gpu"
+              directory="packages/dart_pdf_editor_flutter_gpu"
+              version="${tag#dart_pdf_editor_flutter_gpu-v}"
               ;;
             dart_pdf_editor_assets-v*)
               package="dart_pdf_editor_assets"
@@ -134,7 +146,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: dart-lang/setup-dart/.github/workflows/publish.yml@65eb853c7ba17dde3be364c3d2858773e7144260
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
     with:
       environment: pub.dev
       working-directory: packages/pdf_cos
@@ -145,7 +157,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: dart-lang/setup-dart/.github/workflows/publish.yml@65eb853c7ba17dde3be364c3d2858773e7144260
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
     with:
       environment: pub.dev
       working-directory: packages/pdf_test_fixtures
@@ -156,7 +168,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: dart-lang/setup-dart/.github/workflows/publish.yml@65eb853c7ba17dde3be364c3d2858773e7144260
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
     with:
       environment: pub.dev
       working-directory: packages/pdf_document
@@ -167,10 +179,21 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: dart-lang/setup-dart/.github/workflows/publish.yml@65eb853c7ba17dde3be364c3d2858773e7144260
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
     with:
       environment: pub.dev
       working-directory: packages/pdf_graphics
+
+  publish-dart-pdf-cli:
+    needs: check-publish-needed
+    if: needs.check-publish-needed.outputs.package == 'dart_pdf_cli' && needs.check-publish-needed.outputs.publish_needed == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
+    with:
+      environment: pub.dev
+      working-directory: packages/dart_pdf_cli
 
   publish-dart-pdf-editor:
     needs: check-publish-needed
@@ -178,7 +201,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: dart-lang/setup-dart/.github/workflows/publish.yml@65eb853c7ba17dde3be364c3d2858773e7144260
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
     with:
       environment: pub.dev
       working-directory: packages/dart_pdf_editor
@@ -197,10 +220,10 @@ jobs:
           persist-credentials: false
       # Provision pub.dev's OIDC token before Flutter's SDK shadows `dart`;
       # this is the ordering used by dart-lang/setup-dart's publish workflow.
-      - uses: dart-lang/setup-dart@65eb853c7ba17dde3be364c3d2858773e7144260
+      - uses: dart-lang/setup-dart@7654d458321ee25acccccfdb86cd48bd95768ff1
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.44.8
+          flutter-version: 3.47.0
           channel: stable
           cache: true
       - run: flutter pub get
@@ -216,13 +239,24 @@ jobs:
         working-directory: packages/dart_pdf_editor_assets
         run: dart pub publish --force
 
+  publish-dart-pdf-editor-flutter-gpu:
+    needs: check-publish-needed
+    if: needs.check-publish-needed.outputs.package == 'dart_pdf_editor_flutter_gpu' && needs.check-publish-needed.outputs.publish_needed == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
+    with:
+      environment: pub.dev
+      working-directory: packages/dart_pdf_editor_flutter_gpu
+
   publish-pdf-ocr-vlm:
     needs: check-publish-needed
     if: needs.check-publish-needed.outputs.package == 'pdf_ocr_vlm' && needs.check-publish-needed.outputs.publish_needed == 'true'
     permissions:
       contents: read
       id-token: write
-    uses: dart-lang/setup-dart/.github/workflows/publish.yml@65eb853c7ba17dde3be364c3d2858773e7144260
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
     with:
       environment: pub.dev
       working-directory: packages/pdf_ocr_vlm
@@ -233,7 +267,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: dart-lang/setup-dart/.github/workflows/publish.yml@65eb853c7ba17dde3be364c3d2858773e7144260
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@7654d458321ee25acccccfdb86cd48bd95768ff1
     with:
       environment: pub.dev
       working-directory: packages/pdf_ocr_ondevice

@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:ui' show PointerDeviceKind;
 
+import 'package:flutter/cupertino.dart'
+    show CupertinoTextSelectionToolbar, CupertinoTextSelectionToolbarButton;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -146,6 +149,25 @@ void main() {
       expect(style.borderWidth, 3);
     });
 
+    test('text opacity flows through creation, restyling, and text edits', () {
+      final editing = PdfEditingController(buildMultiPagePdf(1))
+        ..preferences.opacity = 0.4
+        ..addFreeText(0, const PdfRect(100, 600, 300, 660), 'Faded');
+      expect(editing.selectAnnotation(0, 0), isTrue);
+      expect(editing.selectedAnnotation!.behavior.supportsOpacity, isTrue);
+      expect(
+          editing.selectedAnnotation!.appearanceOpacity, closeTo(0.4, 1e-9));
+
+      expect(editing.restyleSelected(opacity: 0.65), isTrue);
+      expect(
+          editing.selectedAnnotation!.appearanceOpacity, closeTo(0.65, 1e-9));
+
+      editing.setSelectedText('Still faded');
+      expect(editing.selectedAnnotation!.contents, 'Still faded');
+      expect(
+          editing.selectedAnnotation!.appearanceOpacity, closeTo(0.65, 1e-9));
+    });
+
     test('restyleSelectedText sets, keeps, and clears fill and border', () {
       final editing = PdfEditingController(buildMultiPagePdf(1))
         ..addFreeText(0, const PdfRect(100, 600, 300, 660), 'Plain');
@@ -279,11 +301,12 @@ void main() {
     }
 
     Future<(PdfEditingController, PdfViewerController)> pumpEditor(
-        WidgetTester tester) async {
+        WidgetTester tester,
+        {Uint8List? bytes}) async {
       // the preference tests above seed the global mock store - these
       // tests assert on default styles, so start from an empty one
       SharedPreferences.setMockInitialValues({});
-      final editing = PdfEditingController(buildMultiPagePdf(2));
+      final editing = PdfEditingController(bytes ?? buildMultiPagePdf(2));
       final viewer = PdfViewerController();
       addTearDown(editing.dispose);
       addTearDown(viewer.dispose);
@@ -357,6 +380,122 @@ void main() {
       expect(annotation.contents, 'Hello in place');
       await settle(tester);
     });
+
+    testWidgets('the inline text editor previews opacity changes',
+        (tester) async {
+      final (editing, _) = await pumpEditor(tester);
+      editing
+        ..preferences.opacity = 0.25
+        ..tool = PdfEditTool.freeText;
+      await tester.pump();
+
+      await drag(tester, view(100, 700), view(300, 640));
+      TextField field() => tester.widget<TextField>(find.byKey(editorKey));
+      expect(field().style!.color!.a, closeTo(0.25, 1e-6));
+
+      editing.preferences.opacity = 0.6;
+      await tester.pump();
+      expect(field().style!.color!.a, closeTo(0.6, 1e-6));
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      await settle(tester);
+    });
+
+    testWidgets(
+        'Bluebeam text keeps its CSS layout, line breaks, caret, and opacity',
+        (tester) async {
+      final (editing, _) =
+          await pumpEditor(tester, bytes: buildBluebeamFreeTextPdf());
+      expect(editing.selectAnnotation(0, 0), isTrue);
+      await tester.pump();
+      expect(editing.requestEditSelectedTextInline(), isTrue);
+      await tester.pump();
+
+      final finder = find.byKey(editorKey);
+      final field = tester.widget<TextField>(finder);
+      expect(field.controller!.text, 'PJ\n202/7');
+      expect(field.controller!.selection,
+          const TextSelection.collapsed(offset: 8));
+      expect(field.textAlign, TextAlign.center);
+      expect(field.strutStyle!.height, closeTo(1.15, 1e-9));
+
+      // Opacity changes while the existing box is still being edited must be
+      // visible immediately, then survive the text rewrite on commit.
+      expect(editing.restyleSelected(opacity: 0.35), isTrue);
+      await tester.pump();
+      expect(tester.widget<TextField>(finder).style!.color!.a,
+          closeTo(0.35, 1e-6));
+
+      await tester.enterText(finder, 'PJ\n202/19');
+      await tap(tester, view(450, 400));
+
+      final annotation = editing.document.page(0).annotations.single;
+      expect(annotation.contents, 'PJ\n202/19');
+      expect(annotation.freeTextStyle!.alignment, PdfTextAlign.center);
+      expect(annotation.freeTextStyle!.lineSpacing, closeTo(1.15, 1e-9));
+      expect(annotation.appearanceOpacity, closeTo(0.35, 1e-9));
+      await settle(tester);
+    });
+
+    testWidgets(
+        'macOS caret stays attached to centered text at deep zoom',
+        (tester) async {
+      final (editing, viewer) = await pumpEditor(tester);
+      const rect = PdfRect(270, 550, 343.221, 567.7585);
+      editing.preferences
+        ..fontSize = 8
+        ..textAlign = PdfTextAlign.center;
+      editing
+        ..addFreeText(0, rect, 'UBX/UNX')
+        ..selectAnnotation(0, 0);
+      await tester.pump();
+
+      // Keep this box at the viewport centre while the outer viewer transform
+      // magnifies it. Flutter's stock macOS caret nudge is in local pixels;
+      // without compensation the zoom turns its 2px adjustment into a large
+      // visible gap at both the start and end of the centred line.
+      viewer.setZoom(4);
+      await tester.pump();
+      expect(editing.requestEditSelectedTextInline(), isTrue);
+      await tester.pump();
+
+      final finder = find.byKey(editorKey);
+      final field = tester.widget<TextField>(finder);
+      final editable = find.descendant(
+          of: finder, matching: find.byType(EditableText));
+      final render = tester.state<EditableTextState>(editable).renderEditable;
+      final chromeScale = field.cursorWidth / 2;
+      expect(chromeScale, lessThan(0.5));
+      expect(
+        render.cursorOffset.dx,
+        closeTo(
+          -2 / tester.view.devicePixelRatio * chromeScale,
+          1e-6,
+        ),
+      );
+
+      final textBox = render
+          .getBoxesForSelection(
+              const TextSelection(baseOffset: 0, extentOffset: 7))
+          .single;
+      final start = render
+          .getLocalRectForCaret(const TextPosition(offset: 0));
+      final end = render
+          .getLocalRectForCaret(const TextPosition(offset: 7));
+      expect(
+        (start.left - textBox.left) / chromeScale,
+        closeTo(-2 / tester.view.devicePixelRatio, 0.5),
+      );
+      expect(
+        (end.left - textBox.right) / chromeScale,
+        closeTo(-2 / tester.view.devicePixelRatio, 0.5),
+      );
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      await settle(tester);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
     testWidgets('tapping without dragging places a default-sized text box',
         (tester) async {
@@ -1408,6 +1547,103 @@ void main() {
       expect(scaled.getHandleSize(20).width, closeTo(18, 0.01));
       expect(field.contextMenuBuilder, isNotNull);
 
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      await settle(tester);
+    });
+
+    testWidgets('the long-press selection menu holds its place while zoomed',
+        (tester) async {
+      // The zoom transform used to drag the menu with it: Flutter places it
+      // through a CompositedTransformFollower linked to the field, which
+      // re-applies the field's scale to a menu already laid out in screen
+      // coordinates. At 2x that displaced it by the whole distance from the
+      // screen origin to the field - off-screen on a phone, so a long press
+      // in a zoomed text box looked like it did nothing.
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.getData') {
+          return <String, dynamic>{'text': 'pasteable'};
+        }
+        if (call.method == 'Clipboard.hasStrings') {
+          return <String, dynamic>{'value': true};
+        }
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null));
+
+      final (editing, viewer) = await pumpEditor(tester);
+      // sits mid-viewport both unzoomed and at 2x, so neither menu is
+      // clamped by a screen edge
+      editing.addFreeText(0, const PdfRect(200, 550, 380, 600), 'Zoom menu');
+      await tester.pump();
+      editing.tool = PdfEditTool.select;
+      await tester.pump();
+      await tap(tester, view(290, 575)); // select
+      await tap(tester, view(290, 575)); // edit
+
+      /// The bounds of the menu's buttons - the visible menu. Its own
+      /// widget lays out over the whole screen, and which buttons the menu
+      /// offers depends on the selection, so measure the buttons and let
+      /// the caller compare centers.
+      Rect menuBounds() {
+        final buttons = find.descendant(
+            of: find.byType(CupertinoTextSelectionToolbar),
+            matching: find.byType(CupertinoTextSelectionToolbarButton));
+        expect(buttons, findsWidgets);
+        return List.generate(buttons.evaluate().length, (i) => i)
+            .map((i) => tester.getRect(buttons.at(i)))
+            .reduce((a, b) => a.expandToInclude(b));
+      }
+
+      /// Long-presses the middle of the editor and returns where the menu
+      /// landed relative to the anchor the framework measured for it, plus
+      /// the height of its buttons.
+      Future<(Offset, double)> pressAndMeasure() async {
+        final field = tester.getRect(find.byKey(editorKey));
+        final gesture = await tester.startGesture(field.center,
+            kind: PointerDeviceKind.touch);
+        await tester.pump(const Duration(milliseconds: 700));
+        await gesture.up();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        final menu = menuBounds();
+        // the anchor is in screen coordinates, and the menu is supposed to
+        // be laid out around it - whatever the field's own transform is
+        final anchor = tester
+            .state<EditableTextState>(find.byType(EditableText))
+            .contextMenuAnchors
+            .primaryAnchor;
+        return (
+          Offset(menu.center.dx - anchor.dx, menu.bottom - anchor.dy),
+          menu.height,
+        );
+      }
+
+      final (unzoomedOffset, unzoomedHeight) = await pressAndMeasure();
+      // on the anchor (within the menu's own padding) and above it
+      expect(unzoomedOffset.dx, closeTo(0, 12));
+      expect(unzoomedOffset.dy, lessThan(0));
+
+      await tap(tester, view(290, 575)); // dismiss the menu, keep editing
+      viewer.setZoom(2 * scale); // 2x transform scale over fit-width
+      await tester.pump();
+
+      final (zoomedOffset, zoomedHeight) = await pressAndMeasure();
+      expect(zoomedOffset.dx, closeTo(unzoomedOffset.dx, 1));
+      expect(zoomedOffset.dy, closeTo(unzoomedOffset.dy, 1));
+      // and at its natural size, not the zoom's
+      expect(zoomedHeight, closeTo(unzoomedHeight, 0.5));
+      // wholly on screen, which is the symptom that started this
+      final screen = Offset.zero &
+          tester.view.physicalSize / tester.view.devicePixelRatio;
+      final menu = menuBounds();
+      expect(screen.contains(menu.topLeft), isTrue, reason: 'menu $menu');
+      expect(screen.contains(menu.bottomRight), isTrue, reason: 'menu $menu');
+
+      debugDefaultTargetPlatformOverride = null;
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pump();
       await settle(tester);

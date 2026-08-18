@@ -1,5 +1,93 @@
 # Changelog
 
+## 3.6.1
+
+- Fix the Linux app exiting at launch: the experimental multi-window bootstrap
+  is disabled on Linux only (upstream: flutter/flutter#191166), restoring the
+  classic single-window startup. Windows and macOS keep multi-window support.
+- Fix the Snap package failing to start under strict confinement by allowing
+  the app to own its `dev.milanko.dartpdf` D-Bus name.
+- Add blocking launch smoke tests for every desktop platform to CI and the
+  release pipeline.
+
+## 3.6.0
+
+- Open documents in multiple native desktop windows and drag tabs between
+  windows, with crash-safe session ownership and correct input routing.
+- Bundle the new `dartpdf` command-line and MCP sidecar in desktop releases for
+  inspecting PDFs, extracting bounded text, and listing forms or annotations.
+- Sandbox the bundled command-line helper correctly in Mac App Store archives.
+- Make annotation panels easier to navigate, keep selections visible across
+  edits, and preserve FreeText opacity while editing and rendering.
+- Preserve Bluebeam FreeText alignment, spacing, and caret placement.
+- Fix stale page rendering after edits on macOS, reveal cloud-backed files in
+  Finder reliably, and improve substituted text spacing on the web.
+
+## 3.5.1
+
+- Fix Open in Finder for PDFs stored in sandboxed OneDrive folders.
+- Fix scanned MRC and JBIG2 pages whose text, background, or mask layers could
+  be missing or opaque.
+- Fix soft-masked images that could render as black blocks with Impeller or the
+  optional GPU renderer.
+- Fix Android document scans that returned a `content://` URI, and show the
+  actual read-back error instead of treating every failure as cancellation.
+
+## 3.5.0
+
+- Large and visually dense PDFs stay responsive while scrolling, panning, and
+  zooming, with the visible region sharpening before bounded background work.
+- Fast navigation now moves through progressively clearer page previews rather
+  than waiting on one final full-detail raster.
+- Keep pages sharp and visible as they cross viewport edges, reduce redundant
+  off-screen detail work, and make remote and web document loading faster and
+  more memory-predictable.
+- Add a live Canvas/flutter_gpu tile-backend switch to Developer tools, along
+  with persistent texture/geometry ceilings and diagnostics for actual route,
+  fallback reasons, compile/replay time, cache pressure, uploads/readbacks,
+  and live resource leases. Export all GPU metrics in the JSON snapshot. PR
+  web previews link to downloadable macOS, Windows, and Linux native builds so
+  the real Impeller backend can be tested even though flutter_gpu has no web
+  runtime. The ad-hoc macOS preview/release packages now omit the provisioned
+  Keychain entitlement so macOS can launch them normally.
+
+## 3.4.0
+
+- Copy and paste annotations between open documents, save placed stamps back
+  to the stamp collection, and show the selected annotation colour in the
+  toolbar.
+- Drop a PDF between page thumbnails to insert its pages at that exact
+  position, and optionally show document chapters on the scrollbar.
+- Improve proportional-font selection and substituted-font placement, keep
+  touch selection menus aligned while zoomed, and hide page-colour editing in
+  view mode.
+- Improve tab-grid scrolling, trackpad pinch-out scrolling, progressive file
+  access, and print-preview reliability.
+
+## 3.3.1
+
+- Changing annotation properties no longer creates a duplicate in PDFs that
+  store annotation lists indirectly.
+- Text colour changes now preserve embedded fonts, and cloud/polygon live
+  previews retain the configured pattern scale.
+- Multi-page reordering has clearer group feedback and moves the selected page
+  set reliably.
+
+## 3.3.0
+
+- Pages you revisit can open immediately from full-resolution memory and disk
+  caches, while optional idle warming prepares more pages before you navigate
+  to them.
+- Deep zoom is sharper on scanned and image-backed PDFs because visible tiles
+  re-decode the source image at the requested detail.
+- Touch panning responds sooner and works reliably from the canvas around a
+  page. Rectangle corner radius is available in the properties panel, newly
+  inserted PDF pages stay in view, and the floating toolbar no longer obscures
+  the end of a document.
+- Linux users can install from the preferred GPG-signed Flatpak repository or
+  the secondary Snap package, with AppImage and portable archives retained as
+  fallbacks.
+
 ## 3.2.0
 
 - Page caching now adapts to device memory and system pressure, and the render

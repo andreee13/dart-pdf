@@ -23,6 +23,7 @@ import 'editing_image_crop.dart';
 import 'editing_interaction.dart';
 import 'editing_link.dart';
 import 'editing_measure.dart';
+import 'editing_text_menu.dart';
 import 'editing_tool_behavior.dart';
 import 'handle_layout.dart';
 import 'stroke_prediction.dart';
@@ -860,6 +861,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   // refreshes _textEditRect from this through the live geometry
   PdfRect? _textEditPageRect;
   bool _textEditExisting = false;
+  (int, int)? _textEditAnnotationSlot;
   PdfEditTool? _textEditTool;
   // when non-null the open editor is a callout: this is the page-space point
   // (the terminus) the committed box's leader line will point at
@@ -875,6 +877,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   double _textEditSize = 14; // pt
   Color _textEditColor = const Color(0xFF000000);
   Color? _textEditFill; // the box background the commit will paint
+  double _textEditOpacity = 1;
   // box-level layout the inline editor previews so the live text matches
   // what commits: alignment (/Q), line height, character spacing, and
   // horizontal glyph scaling
@@ -1012,6 +1015,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     double size,
     Color color,
     Color? fill,
+    double opacity,
     bool washed,
     double rotation,
     PdfTextAlign? align,
@@ -1066,6 +1070,26 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   double get _chromeScale {
     final zoom = widget.zoom;
     return zoom.isFinite && zoom > 0 ? 1 / zoom : 1.0;
+  }
+
+  /// Keeps Flutter's Apple-platform two-device-pixel cursor nudge constant in
+  /// screen space. The editor lives inside the viewer transform, so the stock
+  /// `-2 / devicePixelRatio` local offset otherwise grows with deep zoom and
+  /// leaves the caret visibly detached from both ends of centred text.
+  Widget _zoomAwareCursor(BuildContext context, Widget child) {
+    final media = MediaQuery.of(context);
+    final platform = Theme.of(context).platform;
+    if (platform != TargetPlatform.iOS && platform != TargetPlatform.macOS) {
+      return child;
+    }
+    final scale = _chromeScale;
+    if (!scale.isFinite || scale <= 0) return child;
+    return MediaQuery(
+      data: media.copyWith(
+        devicePixelRatio: media.devicePixelRatio / scale,
+      ),
+      child: child,
+    );
   }
 
   /// Null while the eyedropper is armed without a tool, or while a
@@ -2044,6 +2068,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     double size,
     Color color,
     Color? fill,
+    double opacity,
     PdfTextAlign align,
     bool underline,
     double lineSpacing,
@@ -2072,6 +2097,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       fill: parsed.fillColor != null
           ? Color(0xFF000000 | parsed.fillColor!)
           : null,
+      opacity: annotation.appearanceOpacity,
       align: parsed.alignment,
       underline: parsed.underline,
       lineSpacing: parsed.lineSpacing,
@@ -2375,6 +2401,18 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
         });
       }
     }
+    if (_textEditExisting && _textEditFieldName == null) {
+      // The opacity control restyles the selected annotation in place while
+      // its inline editor stays open. Follow the new appearance alpha so the
+      // live glyphs do not remain opaque and make the control look inert.
+      final opacity = _controller.selectedAnnotationSlot ==
+              _textEditAnnotationSlot
+          ? _controller.selectedAnnotation?.appearanceOpacity
+          : null;
+      if (opacity != null && opacity != _textEditOpacity) {
+        setState(() => _textEditOpacity = opacity);
+      }
+    }
     if (_controller.shouldKeepEditingTextFocused &&
         _textEditRect != null &&
         !_textEditFocus.hasFocus) {
@@ -2400,15 +2438,18 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       final ls = _controller.lineSpacing;
       final cs = _controller.charSpacing;
       final ul = _controller.textUnderline;
+      final opacity = _controller.preferences.opacity;
       final defaultUnderline = _textEditText.defaultStyle.underline;
       if (align != _textEditAlign ||
           ls != _textEditLineSpacing ||
           cs != _textEditCharSpacing ||
+          opacity != _textEditOpacity ||
           (ul != defaultUnderline && !_textEditText.hasRichStyles)) {
         setState(() {
           _textEditAlign = align;
           _textEditLineSpacing = ls;
           _textEditCharSpacing = cs;
+          _textEditOpacity = opacity;
           if (ul != defaultUnderline && !_textEditText.hasRichStyles) {
             _textEditText.resetStyles(
                 _textEditText.defaultStyle.merge(underline: ul));
@@ -2649,6 +2690,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     final style = existing ? _controller.selectedTextStyle : null;
     // /DA carries the text color; /C is the box background for free text
     final annotation = existing ? _controller.selectedAnnotation : null;
+    final annotationSlot =
+        existing ? _controller.selectedAnnotationSlot : null;
     final parsed = annotation?.behavior.style.freeText;
     final annotationColor = annotation?.behavior.style.color;
     // an already-rotated box edits in its rotated frame: take the chrome's
@@ -2686,11 +2729,18 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       _textEditText.resetStyles(fallbackStyle);
       _textEditText.text = existing ? (_controller.selectedText ?? '') : '';
     }
+    // TextEditingController.text invalidates the selection. Focus normally
+    // repairs it, but at the extreme zoom used for large CAD sheets Flutter
+    // can briefly paint the caret at the field origin. Seed the intended
+    // insertion point explicitly so it is always after the last glyph.
+    _textEditText.selection =
+        TextSelection.collapsed(offset: _textEditText.text.length);
     setState(() {
       _textEditRect = rect;
       _textEditPageRect = _geometry.toPageRect(rect);
       _textEditRotation = rotation;
       _textEditExisting = existing;
+      _textEditAnnotationSlot = annotationSlot;
       _textEditTool = _tool;
       _textEditFont =
           defaultFont is PdfStandardFont ? defaultFont : _controller.fontFamily;
@@ -2707,6 +2757,9 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
               ? Color(0xFF000000 | parsed!.fillColor!)
               : null)
           : _controller.preferences.textFillColor;
+      _textEditOpacity = existing
+          ? (annotation?.appearanceOpacity ?? 1)
+          : _controller.preferences.opacity;
     });
     _beginInteraction(PdfEditingInteractionIntent.text, _lastPointerKind);
     _controller.setEditingText(true);
@@ -2764,7 +2817,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
         return (
           terminus,
           base,
-          Color(0xFF000000 | rgb),
+          Color(0xFF000000 | rgb)
+              .withValues(alpha: annotation.appearanceOpacity),
           width > 0 ? width : _geometry.scale,
         );
       }
@@ -2775,7 +2829,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       return (
         terminus,
         _nearestBoxEdge(_textEditRect!, terminus),
-        _controller.preferences.textBorderColor ?? _controller.color,
+        (_controller.preferences.textBorderColor ?? _controller.color)
+            .withValues(alpha: _controller.preferences.opacity),
         _controller.preferences.strokeWidth * _geometry.scale,
       );
     }
@@ -2803,6 +2858,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       _textEditPageRect = rect;
       _textEditRotation = 0;
       _textEditExisting = false;
+      _textEditAnnotationSlot = null;
       _textEditTool = _tool;
       _textEditFieldName = field.name;
       _textEditMultiline = field.isMultiline;
@@ -2812,6 +2868,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       _textEditSize = formSize;
       _textEditColor = const Color(0xFF000000);
       _textEditFill = null;
+      _textEditOpacity = 1;
     });
     _beginInteraction(PdfEditingInteractionIntent.text, _lastPointerKind);
     _controller.setEditingText(true);
@@ -2852,6 +2909,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
         size: size,
         color: const Color(0xFF000000),
         fill: null,
+        opacity: 1,
         washed: true, // cover the old value until the raster lands
         rotation: 0,
         align: PdfTextAlign.left,
@@ -2869,6 +2927,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     final size = _textEditSize;
     final color = _textEditColor;
     final fill = _textEditFill;
+    final opacity = _textEditOpacity;
     final rotation = _textEditRotation;
     final calloutTarget = _textEditCalloutTarget;
     _closeTextEditor();
@@ -2902,6 +2961,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       size: size,
       color: color,
       fill: fill,
+      opacity: opacity,
       washed: existing,
       rotation: rotation,
       align: _textEditAlign,
@@ -2964,11 +3024,13 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
         _textEditRect = null;
         _textEditPageRect = null;
         _textEditFieldName = null;
+        _textEditAnnotationSlot = null;
       });
     } else {
       _textEditRect = null;
       _textEditPageRect = null;
       _textEditFieldName = null;
+      _textEditAnnotationSlot = null;
     }
     _controller.setEditingText(false);
     // hand the keyboard back so the viewer's shortcuts work again right away
@@ -3640,6 +3702,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
             size: wrapStyle.size,
             color: wrapStyle.color,
             fill: wrapStyle.fill,
+            opacity: wrapStyle.opacity,
             // with the lift up the box keeps its true (maybe transparent)
             // fill and the lift hides the old footprint; only without a
             // lift does it fall back to the opaque-paper wash
@@ -4976,6 +5039,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     required double size,
     required Color color,
     required Color? background,
+    Color? wash,
+    double opacity = 1,
     required double rotation,
     PdfTextAlign? align,
     bool underline = false,
@@ -4995,7 +5060,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       PdfTextAlign.center => Alignment.topCenter,
       PdfTextAlign.right => Alignment.topRight,
     };
-    final box = Container(
+    final content = Container(
       key: key,
       color: background,
       padding: EdgeInsets.all(3 * _geometry.scale),
@@ -5022,6 +5087,15 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
         ),
       ),
     );
+    final faded = opacity >= 1
+        ? content
+        : Opacity(opacity: opacity.clamp(0.0, 1.0), child: content);
+    final box = wash == null
+        ? faded
+        : Stack(
+            fit: StackFit.expand,
+            children: [ColoredBox(color: wash), faded],
+          );
     return Positioned.fromRect(
       rect: rect,
       child: IgnorePointer(
@@ -5293,6 +5367,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                     tool: _tool,
                     color: _controller.color,
                     strokeWidth: _controller.preferences.strokeWidth * _geometry.scale,
+                    lineScale: _controller.preferences.lineScale,
                     geometry: _geometry,
                     // the in-progress stroke is NOT here - it rides its own
                     // RepaintBoundary layer below so each appended point is a
@@ -5434,6 +5509,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                   size: wrapResize.size,
                   color: wrapResize.color,
                   background: wrapResize.fill,
+                  opacity: wrapResize.opacity,
                   rotation: _resizeAngle,
                   align: wrapResize.align,
                   underline: wrapResize.underline,
@@ -5449,10 +5525,11 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                   font: after.font,
                   size: after.size,
                   color: after.color,
-                  background: after.fill ??
-                      (after.washed
-                          ? widget.pageColor.withValues(alpha: 0.92)
-                          : null),
+                  background: after.fill,
+                  wash: after.washed
+                      ? widget.pageColor.withValues(alpha: 0.92)
+                      : null,
+                  opacity: after.opacity,
                   rotation: after.rotation,
                   align: after.align,
                   underline: after.underline,
@@ -5544,7 +5621,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                             final direction = _flutterTextDirection(value.text);
                             return Directionality(
                               textDirection: direction,
-                              child: TextField(
+                              child: _zoomAwareCursor(context, TextField(
                                 key: ValueKey(_textEditFieldName == null
                                     ? 'pdf-freetext-editor'
                                     : 'pdf-form-text-editor'),
@@ -5590,23 +5667,25 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                                 selectionControls: _ScaledTextSelectionControls(
                                     _chromeScale,
                                     _inlineTextHandleColor(context)),
+                                // the zoom transform would otherwise scale
+                                // AND displace the menu off-screen
                                 contextMenuBuilder:
-                                    (context, editableTextState) {
-                                  final menu =
-                                      AdaptiveTextSelectionToolbar.editableText(
-                                          editableTextState: editableTextState);
-                                  if (_chromeScale == 1) return menu;
-                                  return Transform.scale(
-                                    scale: _chromeScale,
-                                    alignment: Alignment.topCenter,
-                                    child: menu,
-                                  );
-                                },
+                                    (context, editableTextState) =>
+                                        pdfPlacedTextSelectionMenu(
+                                          editableTextState,
+                                          AdaptiveTextSelectionToolbar
+                                              .editableText(
+                                                  editableTextState:
+                                                      editableTextState),
+                                        ),
                                 // mirrors the committed appearance: same size
                                 // in view pixels, same leading/spacing,
                                 // matching family, color and underline
                                 style: TextStyle(
-                                  color: _textEditColor,
+                                  color: _textEditFieldName == null
+                                      ? _textEditColor.withValues(
+                                          alpha: _textEditOpacity.clamp(0.0, 1.0))
+                                      : _textEditColor,
                                   fontSize: _textEditSize * _geometry.scale,
                                   height: _textEditLineSpacing,
                                   letterSpacing:
@@ -5644,7 +5723,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                                     3 * _geometry.scale,
                                   ),
                                 ),
-                              ),
+                              )),
                             );
                           },
                         ),
@@ -6341,6 +6420,7 @@ class _EditingPreviewPainter extends CustomPainter {
     required this.tool,
     required this.color,
     required this.strokeWidth,
+    required this.lineScale,
     required this.geometry,
     required this.strokes,
     required this.pressures,
@@ -6392,6 +6472,8 @@ class _EditingPreviewPainter extends CustomPainter {
   final PdfEditTool? tool;
   final Color color;
   final double strokeWidth;
+  /// Pattern-size multiplier for live borders, independent of pen width.
+  final double lineScale;
   final PdfPageGeometry geometry;
   final List<List<(double, double)>> strokes;
 
@@ -6553,7 +6635,8 @@ class _EditingPreviewPainter extends CustomPainter {
           canvas, geometry, strokes, pressures, color, strokeWidth);
 
   void _paintShapePreview(
-      Canvas canvas, Rect rect, PdfEditTool? tool, Color color, double width) {
+      Canvas canvas, Rect rect, PdfEditTool? tool, Color color, double width,
+      double patternScale) {
     final paint = Paint()
       ..color = color
       ..style = PaintingStyle.stroke
@@ -6570,7 +6653,8 @@ class _EditingPreviewPainter extends CustomPainter {
             color,
             null,
             width,
-            false);
+            false,
+            patternScale);
       case PdfEditTool.freeText || PdfEditTool.stamp || PdfEditTool.form:
         canvas.drawRect(
             rect,
@@ -6599,9 +6683,9 @@ class _EditingPreviewPainter extends CustomPainter {
   }
 
   void _paintCloudPolygon(Canvas canvas, List<Offset> points, Color color,
-      Color? fillColor, double width, bool dashed) {
+      Color? fillColor, double width, bool dashed, double patternScale) {
     if (points.length < 3) return;
-    final cloud = _cloudPath(points, width);
+    final cloud = _cloudPath(points, width, patternScale);
     if (fillColor != null) {
       // Fill the scalloped outline itself so the interior colour reaches the
       // puffed edges, matching the committed appearance stream.
@@ -6639,14 +6723,16 @@ class _EditingPreviewPainter extends CustomPainter {
   /// matches the committed appearance.
   static const double _cloudNeckCurl = 0.75;
 
-  Path _cloudPath(List<Offset> points, double strokeWidth) {
+  Path _cloudPath(
+      List<Offset> points, double strokeWidth, double patternScale) {
     final path = Path();
     if (points.length < 3) return path;
     final clockwise = _signedArea(points) < 0;
     // The appearance stream uses max(12, sw*4) *page* points; map that arc
     // radius into view space (strokeWidth here is already scaled) so the
     // preview and the saved cloud line up scallop-for-scallop.
-    final arc = math.max(12.0 * geometry.scale, strokeWidth * 4.0);
+    final arc = math.max(
+        12.0 * patternScale * geometry.scale, strokeWidth * 4.0);
     const k = 0.5522847498307936;
     var first = true;
     for (var i = 0; i < points.length; i++) {
@@ -6764,7 +6850,8 @@ class _EditingPreviewPainter extends CustomPainter {
   }
 
   void _paintPathPreview(Canvas canvas, List<Offset> points, PdfEditTool? tool,
-      Color color, Color? fillColor, double width, bool dashed) {
+      Color color, Color? fillColor, double width, bool dashed,
+      double patternScale) {
     if (points.length < 2) return;
     final paint = Paint()
       ..color = color
@@ -6790,7 +6877,8 @@ class _EditingPreviewPainter extends CustomPainter {
       }
     }
     if (tool == PdfEditTool.cloudPolygon && points.length >= 3) {
-      _paintCloudPolygon(canvas, points, color, fillColor, width, dashed);
+      _paintCloudPolygon(
+          canvas, points, color, fillColor, width, dashed, patternScale);
     } else {
       // For the cloud tool with fewer than three vertices there is no cloud
       // to draw yet, so this rubber-bands the straight edge instead - placing
@@ -6838,7 +6926,7 @@ class _EditingPreviewPainter extends CustomPainter {
       Canvas canvas, Offset terminus, Offset base, Color color, double width) {
     _paintPathPreview(
         canvas, [terminus, base], PdfEditTool.callout, color, null, width,
-        false);
+        false, 1);
   }
 
   Path _dashPath(Path path, double width, [List<double>? dashPattern]) {
@@ -6933,7 +7021,8 @@ class _EditingPreviewPainter extends CustomPainter {
     final after = afterShape;
     if (after != null) {
       _paintShapePreview(
-          canvas, after.rect, after.tool, after.color, after.strokeWidth);
+          canvas, after.rect, after.tool, after.color, after.strokeWidth,
+          lineScale);
     }
 
     final afterStamp = this.afterStamp;
@@ -6950,24 +7039,27 @@ class _EditingPreviewPainter extends CustomPainter {
           afterPath.color,
           afterPath.fillColor,
           afterPath.strokeWidth,
-          afterPath.dashed);
+          afterPath.dashed,
+          lineScale);
     }
 
     final livePath = this.livePath;
     if (livePath != null) {
       _paintPathPreview(canvas, livePath.points, livePath.tool, livePath.color,
-          livePath.fillColor, livePath.strokeWidth, livePath.dashed);
+          livePath.fillColor, livePath.strokeWidth, livePath.dashed, lineScale);
     }
 
     final line = dragLine;
     if (line != null) {
       _paintPathPreview(
-          canvas, [line.$1, line.$2], tool, color, null, strokeWidth, dashed);
+          canvas, [line.$1, line.$2], tool, color, null, strokeWidth, dashed,
+          lineScale);
     } else if (dragPath != null) {
       _paintPathPreview(
-          canvas, dragPath!, tool, color, dragPathFill, strokeWidth, dashed);
+          canvas, dragPath!, tool, color, dragPathFill, strokeWidth, dashed,
+          lineScale);
     } else if (dragRect case final rect?) {
-      _paintShapePreview(canvas, rect, tool, color, strokeWidth);
+      _paintShapePreview(canvas, rect, tool, color, strokeWidth, lineScale);
     }
 
     if (calloutLeader case final leader?) {
@@ -7167,6 +7259,7 @@ class _EditingPreviewPainter extends CustomPainter {
       oldDelegate.tool != tool ||
       oldDelegate.color != color ||
       oldDelegate.strokeWidth != strokeWidth ||
+      oldDelegate.lineScale != lineScale ||
       !listEquals(oldDelegate.redactionRects, redactionRects) ||
       oldDelegate.dragRect != dragRect ||
       oldDelegate.calloutLeader != calloutLeader ||

@@ -1,5 +1,48 @@
 # Changelog
 
+## 3.6.0
+
+- Read Bluebeam FreeText paragraph styling from `/DS` and rich-text `/RC` when
+  standard PDF entries are absent, preserving alignment, leading, character
+  spacing, horizontal scale, and underline when editing or regenerating an
+  appearance.
+- Let FreeText annotations participate in opacity restyling, write opacity on
+  creation, and rebuild their appearances without losing the selected alpha.
+
+## 3.5.1
+
+- Lockstep patch release for the scanned-page rendering fixes in `pdf_cos`,
+  `pdf_graphics`, and `dart_pdf_editor`. No public document API changes.
+
+## 3.5.0
+
+- Let `PdfDocument.openSource` expose its requested first-paint page count as a
+  temporary page-count hint when the source deliberately omits the rest of the
+  page-tree walk. The full document opened during progressive handoff remains
+  authoritative, while sparse page-one previews avoid recovery-scanning every
+  intentionally absent leaf reference.
+
+## 3.4.0
+
+- Preserve the unresolved vector template on authored stamp annotations and
+  expose it through `PdfAnnotation.stampTemplate`, allowing a placed stamp to
+  return to a reusable collection without losing dynamic fields (#651).
+
+## 3.3.1
+
+- Fix annotation property edits duplicating the annotation when a page stores
+  its `/Annots` array indirectly (#638).
+- Preserve embedded font resources when changing FreeText colour, so restyled
+  text continues to use the original embedded typeface (#641).
+
+## 3.3.0
+
+- Add lightweight diagnostics to `PdfDiskCache` for hits, misses, writes,
+  oversize rejections, evictions, and byte totals, with `resetStats()` and a
+  one-line `debugStats` summary. Manifest writes are coalesced across bursts so
+  persistent page-raster caches do not rewrite an O(n) manifest for every
+  entry (#615).
+
 ## 3.2.0
 
 - Improve FreeText callout interoperability: recognize third-party callouts

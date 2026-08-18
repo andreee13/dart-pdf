@@ -387,6 +387,92 @@ void main() {
     expect((doc.cos.resolve(helv['Widths']) as CosArray).length, 95);
   });
 
+  test('Bluebeam free text recovers CSS alignment and CR line breaks', () {
+    final doc = PdfDocument.open(buildBluebeamFreeTextPdf());
+    final box = doc.page(0).annotations.single;
+    final style = box.freeTextStyle!;
+
+    expect(style.alignment, PdfTextAlign.center);
+    expect(style.lineSpacing, closeTo(1.15, 1e-9));
+    expect(box.contents, 'PJ\r202/7');
+    expect(pdfNormalizeLineEndings(box.contents!), 'PJ\n202/7');
+
+    // /RC is a second Bluebeam style source when /DS is missing.
+    box.dict.entries.remove('DS');
+    final fromRichContent = PdfAnnotation.fromDict(doc, box.dict);
+    expect(fromRichContent.freeTextStyle!.alignment, PdfTextAlign.center);
+    expect(fromRichContent.freeTextStyle!.lineSpacing, closeTo(1.15, 1e-9));
+
+    // Regeneration must measure the CR as a paragraph break, not as a glyph.
+    final editor = PdfEditor(doc)
+      ..restyleAnnotation(0, fromRichContent, opacity: 0.4);
+    final regenerated = PdfDocument.open(editor.save());
+    final after = regenerated.page(0).annotations.single;
+    final content = appearanceText(regenerated, after);
+    expect(' Tj'.allMatches(content), hasLength(2));
+    expect(content, isNot(contains('\\r')));
+    expect(after.appearanceOpacity, closeTo(0.4, 1e-9));
+  });
+
+  test('standard free text layout entries override Bluebeam CSS fallbacks', () {
+    final doc = PdfDocument.open(buildBluebeamFreeTextPdf());
+    final dict = doc.page(0).annotations.single.dict;
+    final ds = doc.cos.resolve(dict['DS']) as CosString;
+    dict
+      ..['DS'] = CosString.fromText('${ds.text}; text-decoration:underline')
+      ..['Q'] = const CosInteger(2)
+      ..[kPdfFreeTextLineSpacingKey] = const CosReal(1.4)
+      ..[kPdfFreeTextCharSpacingKey] = const CosReal(2)
+      ..[kPdfFreeTextHScaleKey] = const CosReal(80)
+      ..[kPdfFreeTextUnderlineKey] = const CosBoolean(false);
+
+    final style = PdfAnnotation.fromDict(doc, dict).freeTextStyle!;
+    expect(style.alignment, PdfTextAlign.right);
+    expect(style.lineSpacing, 1.4);
+    expect(style.charSpacing, 2);
+    expect(style.horizontalScale, 80);
+    expect(style.underline, isFalse);
+  });
+
+  test('Bluebeam CSS units and underline map to free text layout', () {
+    final doc = PdfDocument.open(buildBluebeamFreeTextPdf());
+    final dict = doc.page(0).annotations.single.dict;
+    dict
+      ..entries.remove('RC')
+      ..['DS'] = CosString.fromText('text-align:center; line-height:150%; '
+          'letter-spacing:2pt; font-stretch:80%; '
+          'text-decoration:underline');
+
+    final percent = PdfAnnotation.fromDict(doc, dict).freeTextStyle!;
+    expect(percent.alignment, PdfTextAlign.center);
+    expect(percent.lineSpacing, 1.5);
+    expect(percent.charSpacing, 2);
+    expect(percent.horizontalScale, 80);
+    expect(percent.underline, isTrue);
+
+    dict['DS'] = CosString.fromText('line-height:1.25em');
+    final em = PdfAnnotation.fromDict(doc, dict).freeTextStyle!;
+    expect(em.lineSpacing, 1.25);
+  });
+
+  test('free text opacity is baked into and preserved by its appearance', () {
+    final doc = roundTrip((e) => e.addFreeText(
+          0,
+          const PdfRect(72, 600, 240, 680),
+          'Translucent text',
+          fillColor: 0xFFFFE0,
+          opacity: 0.4,
+        ));
+    final box = doc.page(0).annotations.single;
+    expect(box.appearanceOpacity, closeTo(0.4, 1e-9));
+    expect(appearanceText(doc, box), startsWith('/GS0 gs'));
+
+    final editor = PdfEditor(doc)
+      ..resizeAnnotation(0, box, const PdfRect(72, 600, 360, 700));
+    final resized = PdfDocument.open(editor.save()).page(0).annotations.single;
+    expect(resized.appearanceOpacity, closeTo(0.4, 1e-9));
+  });
+
   test('free text can lay out RTL visual order and right alignment', () {
     expect(pdfTextLooksRtl('שלום 123'), isTrue);
     expect(pdfVisualText('שלום 123', PdfTextDirection.rtl), '123 םולש');
@@ -852,6 +938,67 @@ void main() {
     expect(stamp.stampTags, ['external', 'field']);
   });
 
+  test('a template stamp carries its design, with fields left unresolved', () {
+    final template = PdfStampTemplate(
+      width: 200,
+      height: 100,
+      components: [
+        PdfStampTemplateComponent.rectangle(
+            x: 0, y: 0, width: 200, height: 100, color: 0x2E7D32),
+        PdfStampTemplateComponent.text(
+            x: 10,
+            y: 30,
+            width: 180,
+            height: 40,
+            text: 'APPROVED {{date}}',
+            color: 0x2E7D32),
+      ],
+    );
+    final doc = roundTrip((e) => e.addTemplateStamp(
+          0,
+          const PdfRect(100, 500, 300, 600),
+          template,
+          contents: 'APPROVED {{date}}',
+          templateValues: const {'date': '2026-08-06'},
+        ));
+    final stamp = doc.page(0).annotations.single;
+
+    // what the page shows has the date filled in...
+    expect(appearanceText(doc, stamp), contains('2026-08-06'));
+    expect(stamp.contents, 'APPROVED 2026-08-06');
+    // ...while the recorded design keeps the live field, so putting this
+    // stamp back in a collection stamps tomorrow's date tomorrow
+    expect(stamp.stampTemplate, template);
+    expect(stamp.stampTemplate!.components[1].text, 'APPROVED {{date}}');
+  });
+
+  test('a template too large to record leaves the stamp without one', () {
+    // In practice the cap only bites on a template carrying a picture, whose
+    // bytes the appearance stream already pays for; a long caption is just
+    // the deterministic way to blow it.
+    final caption = 'A' * PdfAnnotationEditing.maxStampTemplateMetadataBytes;
+    final huge = PdfStampTemplate(
+      width: 200,
+      height: 100,
+      components: [
+        PdfStampTemplateComponent.text(
+            x: 0, y: 0, width: 200, height: 100, text: caption, color: 0),
+      ],
+    );
+    final doc = roundTrip((e) => e.addTemplateStamp(
+        0, const PdfRect(100, 500, 300, 600), huge,
+        contents: 'HUGE'));
+    final stamp = doc.page(0).annotations.single;
+    expect(stamp.stampTemplate, isNull);
+    // the stamp itself is unaffected - it still draws its design
+    expect(appearanceText(doc, stamp), contains('Tj'));
+  });
+
+  test('only a /Stamp reads back a template', () {
+    final doc = roundTrip((e) => e.addNote(0, 500, 700, 'note'));
+    expect(doc.page(0).annotations.single.stampTemplate, isNull);
+  });
+
   test('oriented annotations on rotated pages counter-rotate appearances', () {
     final editor = PdfEditor(PdfDocument.open(buildClassicPdf()))
       ..rotatePages([0], 90);
@@ -937,12 +1084,30 @@ void main() {
   });
 
   test('removeAnnotation on an existing indirect /Annots array', () {
-    final doc = PdfDocument.open(buildAnnotatedPdf());
+    final seeded = PdfEditor(PdfDocument.open(buildIndirectAnnotsPdf()))
+      ..addSquare(0, const PdfRect(100, 100, 200, 150))
+      ..addNote(0, 300, 700, 'keep me');
+    final doc = PdfDocument.open(seeded.save());
     final before = doc.page(0).annotations.length;
     final editor = PdfEditor(doc)
       ..removeAnnotation(0, doc.page(0).annotations.first);
     final reopened = PdfDocument.open(editor.save());
     expect(reopened.page(0).annotations.length, before - 1);
+  });
+
+  test('remove then append composes on an indirect /Annots array', () {
+    final seeded = PdfEditor(PdfDocument.open(buildIndirectAnnotsPdf()))
+      ..addSquare(0, const PdfRect(100, 100, 200, 150));
+    final doc = PdfDocument.open(seeded.save());
+    final removed = doc.page(0).annotations.single;
+    final editor = PdfEditor(doc)
+      ..removeAnnotation(0, removed)
+      ..addNote(0, 500, 700, 'replacement');
+
+    final after = PdfDocument.open(editor.save()).page(0).annotations;
+    expect(after, hasLength(1));
+    expect(after.single.subtype, 'Text');
+    expect(after.single.contents, 'replacement');
   });
 
   test('removeAnnotations deletes multiple annotations in one edit', () {
