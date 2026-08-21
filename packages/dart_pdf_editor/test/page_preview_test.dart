@@ -10,6 +10,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:pdf_cos/pdf_cos.dart';
+import 'package:pdf_cos/perf.dart';
 import 'package:pdf_document/pdf_document.dart';
 import 'package:dart_pdf_editor/dart_pdf_editor.dart';
 import 'package:pdf_graphics/pdf_graphics.dart';
@@ -136,6 +137,108 @@ void main() {
         reason: 'an already-sharp complete preview needs no interpretation');
   });
 
+  test('priceRetainedScene floors a scene at the raster it stands in for', () {
+    // The engine's own picture estimate under-reports a text page by an order
+    // of magnitude, which made the byte budget meaningless and mislead the
+    // process-wide cache registry. The floor is the page's own raster.
+    const letterPageRaster = 1224 * 1584 * 4; // ~7.8 MB
+    expect(
+      PdfPagePreviewCache.priceRetainedScene(
+        commandCount: 38,
+        pictureBytes: 490000,
+        decodedImageBytes: 0,
+        rasterBytes: letterPageRaster,
+      ),
+      letterPageRaster,
+    );
+    // A page whose own parts genuinely cost more than its raster keeps its
+    // real price - decoded images are counted honestly and always add.
+    expect(
+      PdfPagePreviewCache.priceRetainedScene(
+        commandCount: 200000,
+        pictureBytes: 40 << 20,
+        decodedImageBytes: 8 << 20,
+        rasterBytes: letterPageRaster,
+      ),
+      200000 * 260 + (40 << 20) + (8 << 20),
+    );
+  });
+
+  testWidgets('the retained-scene LRU holds a run of ordinary pages',
+      (tester) async {
+    // On the direct picture-presentation path a revisited page repaints from
+    // its retained scene with no record, no replay and no worker round trip.
+    // The entry cap used to be 4 for the whole document, so reading a long
+    // text document threw away pages it had shown seconds earlier. Now the
+    // byte budget decides, and it holds a run of them.
+    const pages = 12;
+    const pageRaster = 1224 * 1584 * 4; // ~7.8 MB, a letter page at fit width
+    final document = PdfDocument.open(buildMultiPagePdf(pages));
+    final cache = PdfPagePreviewCache(maxRetainedSceneBytes: 64 << 20);
+    addTearDown(cache.dispose);
+    for (var i = 0; i < pages; i++) {
+      final page = document.page(i);
+      late PdfRetainedScene scene;
+      await tester.runAsync(() async {
+        scene = await PdfRetainedScene.record(page);
+      });
+      cache
+          .retainScene(
+            i,
+            page,
+            scene,
+            plan: const PdfPageRenderPlan(),
+            fromWorker: true,
+            estimatedBytes: PdfPagePreviewCache.priceRetainedScene(
+              commandCount: scene.commands.length,
+              pictureBytes: 490000,
+              decodedImageBytes: 0,
+              rasterBytes: pageRaster,
+            ),
+          )
+          .dispose();
+    }
+    expect(cache.debugRetainedSceneCount, (64 << 20) ~/ pageRaster);
+    // ...and they are the pages just read, not the ones read first.
+    final recent = cache.retainedSceneFor(pages - 1, document.page(pages - 1),
+        plan: const PdfPageRenderPlan());
+    expect(recent, isNotNull);
+    recent!.dispose();
+    expect(
+      cache.retainedSceneFor(0, document.page(0),
+          plan: const PdfPageRenderPlan()),
+      isNull,
+    );
+  });
+
+  testWidgets('the retained-scene byte budget still governs heavy pages',
+      (tester) async {
+    // A document of dense sheets must still stop at the byte budget, exactly
+    // as it did when the entry cap was the binding limit.
+    final document = PdfDocument.open(buildMultiPagePdf(8));
+    final cache = PdfPagePreviewCache(maxRetainedSceneBytes: 16 << 20);
+    addTearDown(cache.dispose);
+    for (var i = 0; i < 8; i++) {
+      final page = document.page(i);
+      late PdfRetainedScene scene;
+      await tester.runAsync(() async {
+        scene = await PdfRetainedScene.record(page);
+      });
+      cache
+          .retainScene(
+            i,
+            page,
+            scene,
+            plan: const PdfPageRenderPlan(),
+            fromWorker: true,
+            estimatedBytes: 8 << 20, // a dense sheet's scene
+          )
+          .dispose();
+    }
+    expect(cache.debugRetainedSceneCount, 2);
+    expect(cache.debugRetainedSceneBytes, 16 << 20);
+  });
+
   testWidgets('retained scene leases survive LRU eviction until released',
       (tester) async {
     final document = PdfDocument.open(buildMultiPagePdf(2));
@@ -236,6 +339,227 @@ void main() {
         inInclusiveRange(790, 800),
         reason: 'preview ratios do not upscale a sub-800pt page past 1x');
     frame.image.dispose();
+  });
+
+  testWidgets('one interpret fills every rung of the preview ladder',
+      (tester) async {
+    // #699: the ladder's rungs differ only in raster size, so warming them
+    // one call at a time walked the same content stream once per rung.
+    final document = PdfDocument.open(buildClassicPdf());
+    final page = document.page(0);
+    const levels = [400.0, 800.0];
+    PdfPagePreviewCache build() => PdfPagePreviewCache(
+          lodPolicy: const PdfPagePreviewLodPolicy(
+            intermediateLongestSides: levels,
+            maxBytes: 8 * 1024 * 1024,
+            maxEntryBytes: 4 * 1024 * 1024,
+          ),
+        );
+
+    final perRung = build();
+    addTearDown(perRung.dispose);
+    final shared = build();
+    addTearDown(shared.dispose);
+
+    late final int perRungOps;
+    late final int sharedOps;
+    await tester.runAsync(() async {
+      PdfPerf.enabled = true;
+      addTearDown(() => PdfPerf.enabled = false);
+      PdfPerf.reset();
+      await perRung.renderPreview(0, page);
+      await perRung.renderPreview(0, page, targetLongestSide: levels[0]);
+      await perRung.renderPreview(0, page, targetLongestSide: levels[1]);
+      perRungOps = PdfPerf.snapshot().count(PdfPerfCount.contentOps);
+      PdfPerf.reset();
+      await shared.renderPreview(0, page, alsoFillLongestSides: levels);
+      sharedOps = PdfPerf.snapshot().count(PdfPerfCount.contentOps);
+    });
+
+    expect(sharedOps, greaterThan(0));
+    expect(perRungOps, sharedOps * 3,
+        reason: 'a rung per call tokenizes the page three times over; the '
+            'ladder build tokenizes it once and rasterizes each rung from '
+            'that one record');
+    for (final cache in [perRung, shared]) {
+      expect(cache.isFresh(0, page, requireImages: true), isTrue);
+      expect(cache.hasIntermediate(0, targetLongestSide: levels[0]), isTrue);
+      expect(cache.hasIntermediate(0, targetLongestSide: levels[1]), isTrue);
+    }
+    final sharpest = shared.previewFor(0)!;
+    expect(sharpest.targetLongestSide, levels[1]);
+    expect(math.max(sharpest.image.width, sharpest.image.height),
+        inInclusiveRange(790, 800),
+        reason: 'the sharpest rung is rasterized at its own ratio, not '
+            'upscaled from the base preview');
+    sharpest.image.dispose();
+  });
+
+  testWidgets('the ladder builds every rung from a retained scene',
+      (tester) async {
+    // #699: the ladder was the half of the "build the page once" fix left
+    // interpreting. A page the viewer is still holding has already been
+    // walked; its retained scene carries exactly the commands a worker record
+    // would ship back, so the whole ladder should cost replays and rasters -
+    // no content-stream walk at all.
+    final document = PdfDocument.open(buildClassicPdf());
+    final page = document.page(0);
+    const levels = [400.0, 800.0];
+    final cache = PdfPagePreviewCache(
+      lodPolicy: const PdfPagePreviewLodPolicy(
+        intermediateLongestSides: levels,
+        maxBytes: 8 * 1024 * 1024,
+        maxEntryBytes: 4 * 1024 * 1024,
+      ),
+    );
+    addTearDown(cache.dispose);
+    const plan = PdfPageRenderPlan(
+      pageColor: Color(0xFFFFFFFF),
+      annotations: true,
+      rotation: null,
+    );
+
+    late final int ops;
+    final logs = <String>[];
+    await tester.runAsync(() async {
+      final scene = await PdfRetainedScene.record(page, plan: plan);
+      cache
+          .retainScene(0, page, scene,
+              plan: plan, fromWorker: false, estimatedBytes: 1 << 20)
+          .dispose(); // the cache keeps its own reference
+      PdfPerf.enabled = true;
+      addTearDown(() => PdfPerf.enabled = false);
+      PdfPerf.reset();
+      PdfPerfLog.enabled = true;
+      PdfPerfLog.sink = logs.add;
+      addTearDown(() {
+        PdfPerfLog.enabled = false;
+        PdfPerfLog.sink = null;
+      });
+      await cache.renderPreview(0, page, alsoFillLongestSides: levels);
+      ops = PdfPerf.snapshot().count(PdfPerfCount.contentOps);
+    });
+
+    expect(ops, 0,
+        reason: 'the retained scene is replayed, never re-interpreted');
+    expect(cache.isFresh(0, page, requireImages: true), isTrue);
+    expect(cache.hasIntermediate(0, targetLongestSide: levels[0]), isTrue);
+    expect(cache.hasIntermediate(0, targetLongestSide: levels[1]), isTrue);
+    expect(
+      logs.where((line) => line.contains('prerender page=0')).length,
+      3,
+      reason: 'every rung still reports its own cost',
+    );
+    expect(logs.every((line) => !line.contains('prerender page=0') ||
+        line.contains('retained ')), isTrue);
+    final sharpest = cache.previewFor(0)!;
+    expect(sharpest.targetLongestSide, levels[1]);
+    expect(math.max(sharpest.image.width, sharpest.image.height),
+        inInclusiveRange(790, 800));
+    sharpest.image.dispose();
+  });
+
+  testWidgets('a ladder deferred mid-flight releases the scene it leased',
+      (tester) async {
+    // Taking a lease and then bailing out has to give it back: a leaked lease
+    // pins the scene past the cache's own reference, so the memory the LRU
+    // thinks it freed is still held. The motion gate makes this the common
+    // exit, not a rare one.
+    final document = PdfDocument.open(buildClassicPdf());
+    final page = document.page(0);
+    final cache = PdfPagePreviewCache();
+    const plan = PdfPageRenderPlan(
+      pageColor: Color(0xFFFFFFFF),
+      annotations: true,
+      rotation: null,
+    );
+
+    late final PdfRetainedScene scene;
+    await tester.runAsync(() async {
+      scene = await PdfRetainedScene.record(page, plan: plan);
+      cache
+          .retainScene(0, page, scene,
+              plan: plan, fromWorker: false, estimatedBytes: 1 << 20)
+          .dispose(); // the cache keeps its own reference
+      await cache.renderPreview(0, page, deferUiWork: () => true);
+    });
+
+    expect(cache.isFresh(0, page, requireImages: true), isFalse,
+        reason: 'the pass declined before storing anything');
+    cache.dispose(); // drops the cache's own reference
+    expect(() => scene.replay(pixelRatio: 1), throwsAssertionError,
+        reason: 'with the lease returned, disposing the cache frees the scene');
+  });
+
+  testWidgets('a soft-image retained scene is declined by the ladder',
+      (tester) async {
+    // The guard the reuse rests on: a scene whose images were decoded below
+    // the sharpest rung's ratio would draw them softer than a fresh record,
+    // so the ordinary interpret runs instead.
+    final document = PdfDocument.open(buildSyntheticRasterUnderlaySheet(
+      underlays: const [PdfUnderlaySpec(width: 256, height: 256)],
+      layers: 1,
+      ops: 0,
+      pageW: 256,
+      pageH: 256,
+    ));
+    final page = document.page(0);
+    final cache = PdfPagePreviewCache();
+    addTearDown(cache.dispose);
+    const plan = PdfPageRenderPlan(
+      pageColor: Color(0xFFFFFFFF),
+      annotations: true,
+      rotation: null,
+    );
+
+    late final int ops;
+    await tester.runAsync(() async {
+      final scene = await PdfRetainedScene.record(page, plan: plan);
+      cache
+          .retainScene(0, page, scene,
+              plan: plan,
+              fromWorker: false,
+              estimatedBytes: 1 << 20,
+              imagePixelRatio: 0.1)
+          .dispose();
+      PdfPerf.enabled = true;
+      addTearDown(() => PdfPerf.enabled = false);
+      PdfPerf.reset();
+      await cache.renderPreview(0, page);
+      ops = PdfPerf.snapshot().count(PdfPerfCount.contentOps);
+    });
+
+    expect(ops, greaterThan(0),
+        reason: 'a scene decoded below the rung ratio must not serve it');
+    expect(cache.isFresh(0, page, requireImages: true), isTrue);
+  });
+
+  testWidgets('a ladder build skips rungs that are already fresh',
+      (tester) async {
+    final document = PdfDocument.open(buildClassicPdf());
+    final page = document.page(0);
+    const levels = [400.0, 800.0];
+    final cache = PdfPagePreviewCache(
+      lodPolicy: const PdfPagePreviewLodPolicy(
+        intermediateLongestSides: levels,
+        maxBytes: 8 * 1024 * 1024,
+        maxEntryBytes: 4 * 1024 * 1024,
+      ),
+    );
+    addTearDown(cache.dispose);
+
+    late final int ops;
+    await tester.runAsync(() async {
+      await cache.renderPreview(0, page, alsoFillLongestSides: levels);
+      PdfPerf.enabled = true;
+      addTearDown(() => PdfPerf.enabled = false);
+      PdfPerf.reset();
+      await cache.renderPreview(0, page, alsoFillLongestSides: levels);
+      ops = PdfPerf.snapshot().count(PdfPerfCount.contentOps);
+    });
+
+    expect(ops, 0,
+        reason: 'nothing is missing, so the page is not recorded at all');
   });
 
   testWidgets('a late intermediate promotion cannot cross page revisions',
@@ -1319,8 +1643,14 @@ void main() {
     await tester.pump();
     final cache = controller.debugPreviewCache!;
 
+    // A page inside the LoD window fills its whole ladder from one interpret
+    // (#699), so the sharp rungs can land before the wider base sweep gets
+    // to page 4 - wait for both to settle rather than for whichever the
+    // warm order happens to reach first.
     for (var i = 0;
-        i < 150 && !cache.hasIntermediate(2, targetLongestSide: 800);
+        i < 150 &&
+            !(cache.hasIntermediate(2, targetLongestSide: 800) &&
+                cache.has(4));
         i++) {
       await settle(tester);
     }

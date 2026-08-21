@@ -447,6 +447,25 @@ void main() {
       expect(editing.elementsOn(0).elements.single.text, 'Page 1');
     });
 
+    test('replaceSelectedElementText leaves identical runs elsewhere alone',
+        () {
+      // the same words drawn twice, as a header and a footer would be
+      final editing = PdfEditingController(buildTextLinesPdf(const [
+        'Date: 05/08/2026',
+        'Revision: B',
+        'Date: 05/08/2026',
+      ]));
+      editing.selectElementAt(0, 60, 674); // the second "Date:" line
+      final selected = editing.selectedElement;
+      expect(selected?.text, 'Date: 05/08/2026');
+
+      expect(editing.replaceSelectedElementText('Date: 26/05/2026'), 1);
+      expect(
+        [for (final e in editing.elementsOn(0).elements) e.text],
+        const ['Date: 05/08/2026', 'Revision: B', 'Date: 26/05/2026'],
+      );
+    });
+
     test('arming a non-content tool clears the element selection', () {
       final editing = PdfEditingController(buildMultiPagePdf(1))
         ..tool = PdfEditTool.content;
@@ -591,6 +610,30 @@ void main() {
       expect(annotation.rect.width, greaterThan(100));
       expect(annotation.rect.height, greaterThan(50));
       expect(editing.document.page(1).annotations, isEmpty);
+      await settle(tester);
+    });
+
+    testWidgets('a shape dragged past the page edge keeps its off-page bounds',
+        (tester) async {
+      final (editing, _) = await pumpEditor(tester);
+      editing.tool = PdfEditTool.rectangle;
+      await tester.pump();
+
+      // start on the page and drag out past its left edge: the annotation
+      // keeps the bounds that were drawn - the renderer's page clip is what
+      // trims it, not the authoring
+      await drag(tester, view(60, 700), view(-40, 640));
+
+      final annotation = editing.document.page(0).annotations.single;
+      expect(annotation.subtype, 'Square');
+      expect(annotation.rect.left, lessThan(0));
+      expect(annotation.rect.right, closeTo(60, 2));
+
+      // and it survives the save: nothing downstream normalizes /Rect back
+      // onto the page
+      final reopened = PdfDocument.open(editing.bytes);
+      expect(reopened.page(0).annotations.single.rect.left,
+          closeTo(annotation.rect.left, 1e-6));
       await settle(tester);
     });
 

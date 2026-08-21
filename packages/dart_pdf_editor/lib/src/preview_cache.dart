@@ -9,6 +9,7 @@ import 'package:pdf_document/pdf_document.dart';
 
 import 'budgeted_cache.dart';
 import 'perf_log.dart';
+import 'performance_policy.dart';
 import 'raster_cache.dart';
 import 'raster_warm.dart';
 import 'render_worker.dart';
@@ -277,11 +278,11 @@ class PdfPagePreviewCache extends ChangeNotifier {
     PdfPagePreviewLodPolicy lodPolicy = const PdfPagePreviewLodPolicy(),
     int maxFullRasterPixels = 8 << 20,
     int maxFullRasterEntryPixels = 4 << 20,
-    int maxRetainedSceneBytes = 64 << 20,
-    int maxRetainedSceneEntries = 4,
+    int? maxRetainedSceneBytes,
+    int maxRetainedSceneEntries = 32,
   })  : assert(maxFullRasterPixels >= 0),
         assert(maxFullRasterEntryPixels >= 0),
-        assert(maxRetainedSceneBytes >= 0),
+        assert(maxRetainedSceneBytes == null || maxRetainedSceneBytes >= 0),
         assert(maxRetainedSceneEntries > 0),
         _intermediateLongestSides = _normalizedIntermediateSides(
           longestSide,
@@ -291,7 +292,8 @@ class PdfPagePreviewCache extends ChangeNotifier {
         _maxIntermediateEntryBytes = lodPolicy.maxEntryBytes,
         _maxFullRasterBytes = maxFullRasterPixels * 4,
         _maxFullRasterEntryBytes = maxFullRasterEntryPixels * 4,
-        _maxRetainedSceneBytes = maxRetainedSceneBytes,
+        _maxRetainedSceneBytes =
+            maxRetainedSceneBytes ?? pdfDefaultRetainedSceneBytes(),
         _maxRetainedSceneEntries = maxRetainedSceneEntries;
 
   /// Pixel size of a preview's longest side. Stretched to page size on
@@ -357,6 +359,15 @@ class PdfPagePreviewCache extends ChangeNotifier {
   int _maxFullRasterBytes;
   int _maxFullRasterEntryBytes;
   final int _maxRetainedSceneBytes;
+
+  /// Entry ceiling for the retained-scene LRU, alongside its byte budget.
+  ///
+  /// [_maxRetainedSceneBytes] is the governor; this is only a backstop against
+  /// a pathological number of tiny entries, so it is far above what any real
+  /// document reaches. It used to be 4 - the whole document's allowance - and
+  /// that, not the budget, was what made a reader on a long text document
+  /// re-render pages shown seconds earlier: a scene restored from here paints
+  /// with no record, no replay and no worker round trip.
   final int _maxRetainedSceneEntries;
 
   // Three shared budgeted LRUs: base previews bounded by entry count,
@@ -670,11 +681,91 @@ class PdfPagePreviewCache extends ChangeNotifier {
     return entry.acquire();
   }
 
+  /// [retainedSceneFor] for a *display* rather than an exact
+  /// [PdfPageRenderPlan]: tries every spelling of the plan that produces the
+  /// same pixels for this page.
+  ///
+  /// Two of the plan's inputs have spellings that coincide, and a producer
+  /// writes whichever one it happens to hold:
+  ///
+  ///  * **Rotation.** A plan carrying the page's own /Rotate and a plan
+  ///    carrying null are the same render - the viewer always resolves an
+  ///    explicit angle, a bare [PdfPageView] may not.
+  ///  * **Annotations.** The viewer bakes annotations into the page picture
+  ///    only when it is *not* drawing them in a live overlay layer, so an
+  ///    editing session's scenes are annotation-free while a background
+  ///    surface asks for annotations. On a page that carries none those are
+  ///    the same pixels, so only such a page tries the other spelling; an
+  ///    annotated page still renders itself.
+  ///
+  /// Anything else - a view rotation, another paper colour, annotations on a
+  /// page that has some - misses, as it should. Callers own the returned
+  /// handle and must dispose it.
+  PdfRetainedSceneHandle? retainedSceneForDisplay(
+    int index,
+    PdfPage page, {
+    required Color pageColor,
+    required bool annotations,
+    required int? rotation,
+  }) {
+    for (final withAnnotations in <bool>[
+      annotations,
+      if (page.annotations.isEmpty) !annotations,
+    ]) {
+      // Only null and the page's own /Rotate are interchangeable. A view
+      // rotation is a different render, so it tries nothing but itself.
+      final spellsPageRotation = rotation == null || rotation == page.rotation;
+      for (final withRotation in <int?>{
+        rotation,
+        if (spellsPageRotation) ...<int?>[page.rotation, null],
+      }) {
+        final handle = retainedSceneFor(
+          index,
+          page,
+          plan: PdfPageRenderPlan(
+            pageColor: pageColor,
+            annotations: withAnnotations,
+            rotation: withRotation,
+          ),
+        );
+        if (handle != null) return handle;
+      }
+    }
+    return null;
+  }
+
+  /// Prices a retained scene against the LRU's byte budget.
+  ///
+  /// The obvious inputs - the command transcript, the engine's own
+  /// `Picture.approximateBytesUsed`, and the decoded images - add up to a
+  /// number that is badly wrong for exactly the pages this cache is most
+  /// useful for. A 38-command text page prices at ~0.5 MB that way and
+  /// measures at ~9 MB of browser heap: what a retained picture actually
+  /// holds is the engine's shaped text and path objects, which
+  /// `approximateBytesUsed` does not count. Under-pricing did not just make
+  /// the budget generous, it made it meaningless - and it lied to the
+  /// process-wide [PdfCacheRegistry] the host's memory governor drives.
+  ///
+  /// So a scene is priced at no less than the raster it stands in for
+  /// ([rasterBytes], the page's own WxHx4 at display resolution). That is the
+  /// memory the alternative - keeping the page's pixels - would cost, it
+  /// tracks page size and zoom on its own, and measured against the browser's
+  /// agent memory it lands within ~20% of the truth on ordinary pages.
+  static int priceRetainedScene({
+    required int commandCount,
+    required int pictureBytes,
+    required int decodedImageBytes,
+    required int rasterBytes,
+  }) =>
+      math.max(commandCount * 260 + pictureBytes, rasterBytes) +
+      decodedImageBytes;
+
   /// Retains [scene] in the session LRU and returns a lease for the caller.
   ///
-  /// [estimatedBytes] includes the command scene's estimated heap plus the
-  /// engine picture size observed while building it. Oversize entries remain
-  /// usable by the caller through the returned lease but are not cached.
+  /// [estimatedBytes] is what the entry costs against the byte budget - see
+  /// [priceRetainedScene], which every caller should use to compute it.
+  /// Oversize entries remain usable by the caller through the returned lease
+  /// but are not cached.
   PdfRetainedSceneHandle retainScene(
     int index,
     PdfPage page,
@@ -1190,6 +1281,14 @@ class PdfPagePreviewCache extends ChangeNotifier {
   /// synchronous UI-thread work, so callers pace and gate these (the viewer
   /// pauses while the user scrolls). A page that fails to render simply gets
   /// no preview.
+  ///
+  /// [alsoFillLongestSides] names further ladder rungs to fill from the *same*
+  /// interpretation. The ladder's rungs differ only in raster size, so walking
+  /// the content stream once per rung was pure waste: the field trace behind
+  /// #699 shows one page warmed to base/400px/800px costing three interprets
+  /// and 227 ms of platform thread. The page is recorded once, at the sharpest
+  /// requested rung's image resolution, and every rung is rasterized from that
+  /// one picture.
   Future<void> renderPreview(int index, PdfPage page,
       {Color pageColor = const Color(0xFFFFFFFF),
       bool annotations = true,
@@ -1197,6 +1296,7 @@ class PdfPagePreviewCache extends ChangeNotifier {
       int? rotation,
       bool decodeImages = true,
       double? targetLongestSide,
+      List<double> alsoFillLongestSides = const [],
       int priority = 1,
       int? commandLimit,
       bool Function()? deferUiWork}) async {
@@ -1204,13 +1304,7 @@ class PdfPagePreviewCache extends ChangeNotifier {
     if (_disposed ||
         !_acceptsPage(index, page) ||
         (intermediate &&
-            !_intermediateLongestSides.contains(targetLongestSide)) ||
-        isFresh(
-          index,
-          page,
-          requireImages: decodeImages,
-          targetLongestSide: targetLongestSide,
-        )) {
+            !_intermediateLongestSides.contains(targetLongestSide))) {
       return;
     }
     // Command-limited/vector-first pixels are the instant fallback. Promoting
@@ -1223,99 +1317,195 @@ class PdfPagePreviewCache extends ChangeNotifier {
       // is exactly what fast-scroll prefetch is trying to avoid.
       return;
     }
+    // The rungs this build owes, the caller's own target first. A rung that is
+    // already fresh, not configured, or (for intermediates) not image-complete
+    // never joins.
+    final targets = <double?>[];
+    void consider(double? side) {
+      if (targets.contains(side)) return;
+      if (side != null &&
+          (!decodeImages || !_intermediateLongestSides.contains(side))) {
+        return;
+      }
+      if (isFresh(index, page,
+          requireImages: decodeImages, targetLongestSide: side)) {
+        return;
+      }
+      targets.add(side);
+    }
+
+    consider(targetLongestSide);
+    for (final side in alsoFillLongestSides) {
+      consider(side);
+    }
+    if (targets.isEmpty) return;
     try {
       final sw = Stopwatch()..start();
       final size = PdfPageRenderer.pageSize(page, rotation: rotation);
-      final ratio = _ratioFor(size, targetLongestSide: targetLongestSide);
+      // One build serves every rung, so it has to be recorded at the sharpest
+      // one's resolution: images decoded for a 200px preview cannot be
+      // sharpened into an 800px one afterwards.
+      var buildRatio = 0.0;
+      for (final side in targets) {
+        buildRatio =
+            math.max(buildRatio, _ratioFor(size, targetLongestSide: side));
+      }
+      // The page the viewer is still holding is the cheapest source of all.
+      // A retained scene carries exactly the commands a worker record would
+      // ship back, without the transfer or the main-thread reconstruction, and
+      // without any content-stream walk at all - so it is tried ahead of both.
+      // #700 gave thumbnails this; the ladder was the half left interpreting,
+      // which is what the #699 trace measured as `prerender ... full warm=`.
+      final retained = _retainedSceneForPreview(
+        index,
+        page,
+        pageColor: pageColor,
+        annotations: annotations,
+        rotation: rotation,
+        buildRatio: buildRatio,
+        decodeImages: decodeImages,
+      );
       // priority 1: prefetch yields to any on-screen page the worker owes.
-      // The preview is rasterized at [ratio] (longest side ~200px), so cap the
-      // worker's images to that - a heavy raster underlay need not ship at full
+      // Every rung is rasterized at or below [buildRatio], so cap the worker's
+      // images to that - a heavy raster underlay need not ship at full
       // resolution just to be downscaled into a thumbnail.
-      final commands = worker != null && worker.isActive
+      final commands = retained == null && worker != null && worker.isActive
           ? await worker.record(index,
               annotations: annotations,
               priority: priority,
-              imagePixelRatio: decodeImages ? ratio : null,
+              imagePixelRatio: decodeImages ? buildRatio : null,
               decodeImages: decodeImages,
               commandLimit: commandLimit)
           : null;
       if (!decodeImages && commands == null) {
-        // Worker-declined vector warms must stay cheap. Falling back to
-        // renderImage here would synchronously interpret/decode images on the
-        // UI thread during the fast-scroll path.
+        // Worker-declined vector warms must stay cheap. Recording locally here
+        // would synchronously interpret/decode images on the UI thread during
+        // the fast-scroll path.
         return;
       }
-      if (deferUiWork?.call() ?? false) return;
-      if (_disposed ||
-          !_acceptsPage(index, page) ||
-          isFresh(
-            index,
-            page,
-            requireImages: decodeImages,
-            targetLongestSide: targetLongestSide,
-          )) {
+      if ((deferUiWork?.call() ?? false) ||
+          _disposed ||
+          !_acceptsPage(index, page)) {
+        retained?.dispose();
         return;
       }
-      final ui.Image image;
       var includesImages = decodeImages;
-      if (commands != null) {
+      final plan = PdfPageRenderPlan(
+          pageColor: pageColor, annotations: annotations, rotation: rotation);
+      final ui.Picture picture;
+      // A picture the cache entry owns must outlive this call; only one we
+      // build here is ours to dispose.
+      var ownsPicture = true;
+      if (retained != null) {
+        // A retained scene is a complete page record - it is only offered for
+        // full warms, and every rung it fills carries that page's images.
+        includesImages = true;
+        final retainedPicture = retained.picture;
+        if (retainedPicture != null) {
+          picture = retainedPicture;
+          ownsPicture = false;
+        } else {
+          // One flat replay in page-point space serves every rung, mirroring
+          // the single record the other two branches build.
+          picture = retained.scene.replay(pixelRatio: 1);
+        }
+      } else if (commands != null) {
         includesImages = commandLimit == null &&
             (decodeImages || !PdfPageRenderer.hasImageDraws(commands));
-        final picture = await PdfPageRenderer.pictureFromCommands(
-            page, commands,
-            pageColor: pageColor,
-            rotation: rotation,
-            includeImages: decodeImages,
-            maxImagePixelRatio: ratio);
-        if (!_acceptsPage(index, page) || (deferUiWork?.call() ?? false)) {
-          picture.dispose();
-          return;
-        }
-        try {
-          image = await PdfPageRenderer.rasterize(picture, size, ratio);
-        } finally {
-          picture.dispose();
-        }
+        picture = await PdfPageRenderer.pictureFromCommandsWithPlan(
+            page, commands, plan,
+            includeImages: decodeImages, maxImagePixelRatio: buildRatio);
       } else {
-        if (deferUiWork?.call() ?? false) return;
-        image = await PdfPageRenderer.renderImage(page,
-            pixelRatio: ratio,
-            pageColor: pageColor,
-            annotations: annotations,
-            recorded: true,
-            rotation: rotation);
+        picture = await PdfPageRenderer.renderPictureRecordedWithPlan(page, plan,
+            maxImagePixelRatio: buildRatio);
       }
-      if (deferUiWork?.call() ?? false) {
-        image.dispose();
-        return;
-      }
-      sw.stop();
-      PdfPerfLog.log('prerender page=$index '
-          'lod=${targetLongestSide == null ? 'base' : '${targetLongestSide.toStringAsFixed(0)}px'} '
-          '${commands != null ? 'worker ' : ''}'
-          '${includesImages ? 'full' : 'vector'} '
-          'warm=${(sw.elapsedMicroseconds / 1000).toStringAsFixed(1)}ms');
-      if (_disposed ||
-          !_acceptsPage(index, page) ||
-          isFresh(
+      try {
+        var shared = false;
+        for (final side in targets) {
+          if (deferUiWork?.call() ?? false) return;
+          if (_disposed ||
+              !_acceptsPage(index, page) ||
+              isFresh(index, page,
+                  requireImages: decodeImages, targetLongestSide: side)) {
+            continue;
+          }
+          final image = await PdfPageRenderer.rasterize(
+              picture, size, _ratioFor(size, targetLongestSide: side));
+          if (deferUiWork?.call() ?? false) {
+            image.dispose();
+            return;
+          }
+          if (_disposed ||
+              !_acceptsPage(index, page) ||
+              isFresh(index, page,
+                  requireImages: decodeImages, targetLongestSide: side)) {
+            image.dispose();
+            continue;
+          }
+          // `shared` marks a rung that cost only its own raster because the
+          // rung before it already paid for the interpret - the line a #699
+          // trace comparison reads.
+          PdfPerfLog.log('prerender page=$index '
+              'lod=${side == null ? 'base' : '${side.toStringAsFixed(0)}px'} '
+              '${retained != null ? 'retained ' : ''}'
+              '${commands != null ? 'worker ' : ''}'
+              '${shared ? 'shared ' : ''}'
+              '${includesImages ? 'full' : 'vector'} '
+              'warm=${(sw.elapsedMicroseconds / 1000).toStringAsFixed(1)}ms');
+          sw.reset();
+          shared = true;
+          _store(
             index,
             page,
-            requireImages: decodeImages,
-            targetLongestSide: targetLongestSide,
-          )) {
-        image.dispose();
-        return;
+            image,
+            includesImages: includesImages,
+            targetLongestSide: side,
+          );
+        }
+      } finally {
+        if (ownsPicture) picture.dispose();
+        retained?.dispose();
       }
-      _store(
-        index,
-        page,
-        image,
-        includesImages: includesImages,
-        targetLongestSide: targetLongestSide,
-      );
     } catch (_) {
       // no preview is strictly better than a crash mid-scroll
     }
+  }
+
+  /// The retained scene [renderPreview] may build this page's rungs from, or
+  /// null when none is usable.
+  ///
+  /// A scene whose images were decoded below [buildRatio] would draw them
+  /// softer than a fresh record, so those decline and the ordinary paths run.
+  /// Preview rungs sit at or below 1x while a display scene is decoded at the
+  /// page's own display ratio, so this is a guard rather than a common case.
+  PdfRetainedSceneHandle? _retainedSceneForPreview(
+    int index,
+    PdfPage page, {
+    required Color pageColor,
+    required bool annotations,
+    required int? rotation,
+    required double buildRatio,
+    required bool decodeImages,
+  }) {
+    // Vector-first warms exist to put *some* pixels up during a fast scroll
+    // without any main-thread render; a replay is cheap but is not nothing, so
+    // that path keeps its worker-only contract and this serves the full warms
+    // the #699 trace measured.
+    if (!decodeImages) return null;
+    final handle = retainedSceneForDisplay(
+      index,
+      page,
+      pageColor: pageColor,
+      annotations: annotations,
+      rotation: rotation,
+    );
+    if (handle == null) return null;
+    final sceneImageRatio = handle.imagePixelRatio;
+    if (sceneImageRatio != null && sceneImageRatio < buildRatio) {
+      handle.dispose();
+      return null;
+    }
+    return handle;
   }
 
   /// Bakes the exact, display-sized raster of an off-screen page into the
