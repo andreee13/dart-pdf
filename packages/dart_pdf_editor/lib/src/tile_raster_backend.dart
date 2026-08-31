@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
+import 'package:pdf_graphics/pdf_graphics.dart';
 
 import 'retained_scene.dart';
 import 'tile_store.dart';
@@ -38,19 +41,60 @@ abstract class PdfTileRasterBackend {
   ///
   /// The Canvas backend only needs the engine [ui.Image], so dropping the
   /// duplicate worker payload immediately saves memory. A backend that can
-  /// upload those bytes directly may opt in and release them after its
-  /// one-time scene compilation through
+  /// upload those bytes directly may opt in and release them after its one-time
+  /// scene compilation through
   /// [PdfRetainedScene.releaseDecodedImagePixels].
   bool get prefersDirectDecodedImageUploads => false;
 
+  /// Whether this command mix needs locally decoded RGBA retained for upload.
+  ///
+  /// Returning false lets compatible engine images stay on a zero-copy import
+  /// route. Backends should return true only when scene resources require a CPU
+  /// representation, such as a hand-built mip chain.
+  bool shouldRetainLocallyDecodedImagePixels(List<PdfRenderCommand> commands) =>
+      false;
+
+  /// Whether [warmUp] performs useful process- or view-scoped preparation.
+  ///
+  /// False lets the viewer skip its idle timer entirely for Canvas and other
+  /// no-op backends. Implementations that opt in must coalesce repeated calls.
+  bool get supportsWarmUp => false;
+
+  /// Whether sessions returned by [createSession] implement
+  /// [PdfTileRasterWarmUp]. False avoids creating an otherwise-unused session
+  /// for backends that have no scene-specific preparation.
+  bool get supportsSessionWarmUp => false;
+
+  /// Prepares process- or view-scoped resources before the first tile.
+  ///
+  /// [PdfViewer] calls this after useful pixels and a quiet window, never while
+  /// constructing the initial page. Backends can use the idle lead time to
+  /// load shaders or issue a bounded compilation pass. Calls may repeat after
+  /// a backend or native view changes, so implementations must coalesce their
+  /// own work. The default Canvas implementation has nothing to prepare.
+  Future<void> warmUp() => Future<void>.value();
+
   /// Creates a lightweight owner for resources retained across tile renders.
   ///
-  /// This is called lazily, when the tile path first needs pixels—not while
-  /// the page's initial raster is being prepared. Expensive initialization
-  /// should itself be deferred by the returned session until
-  /// [PdfTileRasterSession.rasterizeRegion], so enabling an experimental
-  /// backend cannot delay first paint.
+  /// This is called lazily when the tile path first needs pixels, or by an
+  /// opted-in [PdfTileRasterWarmUp] pass after useful page pixels and a quiet
+  /// window—not while the page's initial raster is being prepared.
+  /// Scene-specific work otherwise stays deferred until
+  /// [PdfTileRasterSession.rasterizeRegion]; only view-scoped work belongs in
+  /// [warmUp].
   PdfTileRasterSession? createSession(PdfRetainedScene scene);
+}
+
+/// Optional asynchronous second chance after [PdfTileRasterBackend.createSession]
+/// conservatively declines a retained scene.
+///
+/// The viewer calls [retrySession] immediately after the synchronous result is
+/// null. Returning null keeps the normal Canvas fallback. Returning a future
+/// starts the extra work asynchronously; if that future later completes with
+/// null or throws, the same exact Canvas fallback takes over.
+/// This is intended for bounded re-recording strategies, not approximations.
+abstract interface class PdfTileRasterRetryBackend {
+  Future<PdfTileRasterSession?>? retrySession(PdfRetainedScene scene);
 }
 
 /// Scene-lifetime resources used to rasterize many tile regions.
@@ -106,6 +150,16 @@ abstract interface class PdfTileRasterScheduling {
   int? get maxNewTilesPerPaint;
 }
 
+/// Optional idle preparation for a scene-scoped tile session.
+///
+/// A page invokes this only after its first useful pixels have landed. The
+/// session stays owned by that page and is disposed through the ordinary
+/// scene lifecycle, so a backend can prepare geometry and uploads without
+/// creating a separate document-wide cache or extending resource lifetimes.
+abstract interface class PdfTileRasterWarmUp {
+  Future<void> warmUp();
+}
+
 /// Bounded, always-on page/tile routing diagnostics for support exports.
 ///
 /// Aggregate backend counters can say that a GPU submission completed, but
@@ -113,7 +167,7 @@ abstract interface class PdfTileRasterScheduling {
 /// whether that page had already fallen back to Canvas. This registry records
 /// the latest route and raster for up to [maxEntries] page namespaces without
 /// retaining documents, scenes, or viewer objects.
-class PdfTileRasterDiagnostics {
+class PdfTileRasterDiagnostics extends ChangeNotifier {
   PdfTileRasterDiagnostics._();
 
   static final PdfTileRasterDiagnostics instance = PdfTileRasterDiagnostics._();
@@ -155,6 +209,7 @@ class PdfTileRasterDiagnostics {
     while (_entries.length > maxEntries) {
       _entries.remove(_entries.keys.first);
     }
+    _scheduleNotify();
   }
 
   void reportFallback({
@@ -170,6 +225,7 @@ class PdfTileRasterDiagnostics {
       ..fallbackReason = error.toString()
       ..updatedAt = DateTime.now();
     _entries[(entry.namespaceIdentity, pageIndex)] = entry;
+    _scheduleNotify();
   }
 
   void reportTile({
@@ -202,7 +258,28 @@ class PdfTileRasterDiagnostics {
       }
       ..updatedAt = DateTime.now();
     _entries[(entry.namespaceIdentity, pageIndex)] = entry;
+    _scheduleNotify();
   }
+
+  /// The latest typed diagnostics for [pageIndex] in [cacheNamespace].
+  ///
+  /// The returned value is an immutable snapshot. It remains safe to retain
+  /// while later tile submissions update this process-wide registry.
+  PdfTileRasterDiagnostic? page(
+    Object cacheNamespace,
+    int pageIndex,
+  ) =>
+      _entries[(identityHashCode(cacheNamespace), pageIndex)]?.snapshot();
+
+  /// Typed diagnostics for one viewer namespace, oldest update first.
+  ///
+  /// [namespaceIdentity] is exposed by
+  /// [PdfViewerController.tileCacheNamespaceIdentity].
+  List<PdfTileRasterDiagnostic> forNamespace(int namespaceIdentity) =>
+      <PdfTileRasterDiagnostic>[
+        for (final entry in _entries.values)
+          if (entry.namespaceIdentity == namespaceIdentity) entry.snapshot(),
+      ];
 
   /// A JSON-safe, least-recently-updated-first snapshot.
   List<Map<String, Object?>> snapshot() => <Map<String, Object?>>[
@@ -210,7 +287,92 @@ class PdfTileRasterDiagnostics {
       ];
 
   /// Clears support history without changing any renderer or cache state.
-  void clear() => _entries.clear();
+  void clear() {
+    if (_entries.isEmpty) return;
+    _entries.clear();
+    _scheduleNotify();
+  }
+
+  bool _notifyScheduled = false;
+
+  // Sessions can be created from a lazy page's build/layout path. Coalesce a
+  // burst and notify after the current stack so a listening devtool never
+  // triggers a build-during-build exception.
+  void _scheduleNotify() {
+    // The support registry remains always-on, but the extra UI work is truly
+    // opt-in: without a visible devtool there is no listener and no queued
+    // microtask on each tile completion.
+    if (!hasListeners || _notifyScheduled) return;
+    _notifyScheduled = true;
+    scheduleMicrotask(() {
+      _notifyScheduled = false;
+      notifyListeners();
+    });
+  }
+}
+
+/// How a page's deep-zoom detail tiles are currently rasterized.
+enum PdfTileRasterRoute {
+  /// No tile session has been requested yet; the fitted base raster is Canvas.
+  unrouted,
+
+  /// Canvas was explicitly requested as the tile backend.
+  canvas,
+
+  /// An accelerated backend declined or failed and Canvas took over.
+  canvasFallback,
+
+  /// The requested non-Canvas backend owns the tile session.
+  accelerated,
+}
+
+/// Immutable, typed view of one page's latest tile-routing diagnostics.
+@immutable
+class PdfTileRasterDiagnostic {
+  const PdfTileRasterDiagnostic({
+    required this.namespaceIdentity,
+    required this.documentIdentity,
+    required this.sceneIdentity,
+    required this.pageIndex,
+    required this.requestedBackend,
+    required this.effectiveBackend,
+    required this.fallbackReason,
+    required this.commandCount,
+    required this.pageColor,
+    required this.annotations,
+    required this.rotation,
+    required this.updatedAt,
+    required this.tileRasters,
+    required this.tileFailures,
+    required this.lastTileError,
+    required this.lastTile,
+  });
+
+  final int namespaceIdentity;
+  final int documentIdentity;
+  final int sceneIdentity;
+  final int pageIndex;
+  int get pageNumber => pageIndex + 1;
+  final String requestedBackend;
+  final String effectiveBackend;
+  final String? fallbackReason;
+  final int commandCount;
+  final int pageColor;
+  final bool annotations;
+  final int? rotation;
+  final DateTime updatedAt;
+  final int tileRasters;
+  final int tileFailures;
+  final String? lastTileError;
+  final Map<String, Object?>? lastTile;
+
+  PdfTileRasterRoute get route {
+    if (effectiveBackend != 'canvas') return PdfTileRasterRoute.accelerated;
+    if (requestedBackend == 'canvas' && fallbackReason == null) {
+      return PdfTileRasterRoute.canvas;
+    }
+    return PdfTileRasterRoute.canvasFallback;
+  }
 }
 
 class _PdfTileRasterDiagnosticEntry {
@@ -266,6 +428,27 @@ class _PdfTileRasterDiagnosticEntry {
         'lastTileError': lastTileError,
         'lastTile': lastTile,
       };
+
+  PdfTileRasterDiagnostic snapshot() => PdfTileRasterDiagnostic(
+        namespaceIdentity: namespaceIdentity,
+        documentIdentity: documentIdentity,
+        sceneIdentity: sceneIdentity,
+        pageIndex: pageIndex,
+        requestedBackend: requestedBackend,
+        effectiveBackend: effectiveBackend,
+        fallbackReason: fallbackReason,
+        commandCount: commandCount,
+        pageColor: pageColor,
+        annotations: annotations,
+        rotation: rotation,
+        updatedAt: updatedAt,
+        tileRasters: tileRasters,
+        tileFailures: tileFailures,
+        lastTileError: lastTileError,
+        lastTile: lastTile == null
+            ? null
+            : Map<String, Object?>.unmodifiable(lastTile!),
+      );
 }
 
 /// The universal retained-scene renderer used today and as a fallback for

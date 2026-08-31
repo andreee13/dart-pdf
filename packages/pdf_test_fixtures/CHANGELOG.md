@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.0.0
+
+- Lockstep major release for the dart-pdf 4.0.0 package suite. No public
+  fixture API changes since 3.8.0.
+
+## 3.8.0
+
+- Add the public `buildCadImageStripPdf` fixture for benchmarking and testing
+  image-heavy CAD pages.
+- Make deterministic fixture generation browser-safe by avoiding integer
+  arithmetic that JavaScript runtimes cannot represent exactly.
+
 ## 3.7.0
 
 - Add `buildTextLinesPdf`, a one-page fixture drawing each line as its own text

@@ -14,6 +14,8 @@ import '../debug_overlays.dart';
 import '../l10n/pdf_l10n.dart';
 import '../page_geometry.dart';
 import '../platform_cursors.dart';
+import '../popup_position.dart';
+import '../render_worker.dart';
 import '../renderer.dart';
 import '../theme.dart';
 import 'editing_color_pick.dart';
@@ -509,6 +511,8 @@ class EditingPageOverlay extends StatefulWidget {
     this.onMoveDragPreview,
     this.onTextEditClosed,
     this.contextMenuEnabled = true,
+    this.showSelectionChip = true,
+    this.renderWorker,
   });
 
   final PdfEditingController controller;
@@ -575,6 +579,14 @@ class EditingPageOverlay extends StatefulWidget {
   /// controller (the menu path is reader-mode only). Defaults to true.
   final bool contextMenuEnabled;
 
+  /// Whether a touch/stylus annotation selection shows the floating action
+  /// chip beside it (delete, edit-in-place, the context menu). Hosts that
+  /// render their own UI over the selection - a custom markup toolbar or a
+  /// note editor on annotation tap - can turn the chip off to stop it
+  /// overlapping that UI. Selection, handles, and move/resize interactions
+  /// are unaffected. Defaults to true.
+  final bool showSelectionChip;
+
   /// Whether the page raster on screen already shows the controller's
   /// current revision. While false (an edit just committed and the
   /// re-render is in flight), the overlay keeps painting the committed
@@ -592,6 +604,11 @@ class EditingPageOverlay extends StatefulWidget {
   /// draws a forward-extrapolated lead so the painted line keeps up with
   /// the pen tip.
   final bool predictStrokes;
+
+  /// The viewer's render worker, used to build the eyedropper's sampling
+  /// raster off the UI isolate - see [PdfPageColorSampler.of]. Null falls
+  /// back to a local render.
+  final PdfRenderWorker? renderWorker;
 
   @override
   State<EditingPageOverlay> createState() => _EditingPageOverlayState();
@@ -720,6 +737,16 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   Offset? _pickPosition;
   Color? _pickPreview;
 
+  /// Where the pointer that is currently down went down, and whether it has
+  /// since travelled far enough to be a drag rather than a tap. While the
+  /// eyedropper is armed the overlay stands aside for the scroll view (see
+  /// the pan callbacks in [build]) so the user can reach the rest of the
+  /// document, which means a touch scroll's pointer-up arrives here like any
+  /// other: only a tap may commit a sample. A mouse/trackpad press keeps its
+  /// press-drag-release pick - those devices don't drag-scroll the list.
+  Offset? _pickDownPosition;
+  bool _pickDragged = false;
+
   // ink
   List<(double, double)>? _activeStroke;
   List<double>? _activeStrokePressures;
@@ -735,7 +762,15 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   /// thing that drives it, including the clear on commit/bail).
   final ValueNotifier<int> _activeStrokeRepaint = ValueNotifier<int>(0);
 
-  void _bumpActiveStroke() => _activeStrokeRepaint.value++;
+  /// A pointer's whole gesture keeps being routed to the render object it
+  /// went down on, so a page scrolled out from under a live pointer - which
+  /// is exactly what a touch scroll with the eyedropper armed does - still
+  /// delivers moves and an up to this state after it has been unmounted.
+  /// Both repaint signals therefore have to tolerate being ticked late.
+  void _bumpActiveStroke() {
+    if (!mounted) return;
+    _activeStrokeRepaint.value++;
+  }
 
   /// Repaint signal for the hover-cursor layer - the pen dot, eraser ring,
   /// count/stamp/signature previews, the rotate glyph and the eyedropper
@@ -753,7 +788,10 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   /// painter's shouldRepaint is true - so the rarer paths keep using it).
   final ValueNotifier<int> _cursorRepaint = ValueNotifier<int>(0);
 
-  void _bumpCursor() => _cursorRepaint.value++;
+  void _bumpCursor() {
+    if (!mounted) return;
+    _cursorRepaint.value++;
+  }
 
   /// Extends the in-progress ink stroke to the view-space [localPosition].
   /// Normally each sample appends, tracing the freehand path; while Shift is
@@ -915,6 +953,34 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   /// so a drop over another page can be resolved to a page point (drag-end
   /// details carry no position).
   Offset? _moveCurrentGlobal;
+
+  // Content-tool drags: repositioning the selected page-content element (a
+  // text run, a placed image or logo, a filled path) rather than an
+  // annotation. Kept apart from the select-tool move state above because
+  // none of that machinery - cross-page drops, annotation ghosts, resize
+  // handles - applies to a drawing inside the content stream.
+  Offset? _elementMoveStart;
+  Offset? _elementMoveCurrent;
+
+  /// The pair a content-element drag paints with, captured when it begins:
+  /// the page WITHOUT the dragged element, and that element ALONE on
+  /// transparent paper. Clipping one page picture to the element's box
+  /// cannot separate it from whatever else shares that box - a neighbouring
+  /// run, a rule, a filled panel - so the two are rendered apart. Lazily;
+  /// a drag before they land just moves the chrome. Keyed by
+  /// [_elementLiftKey] so a second drag on the same revision reuses them.
+  ui.Picture? _elementClean;
+  ui.Picture? _elementOnly;
+  Object? _elementLiftKey;
+
+  /// The same pair, held past the commit and painted over the whole page
+  /// until the new raster lands: a content edit drops the page's cached
+  /// raster, so without this the page blanks while it re-renders. Cleared
+  /// by [_clearAfterimage] like every other afterimage.
+  ui.Picture? _afterElementClean;
+  ui.Picture? _afterElementOnly;
+  Rect? _afterElementFrom;
+  Offset _afterElementOffset = Offset.zero;
 
   // Edge auto-scroll: while a region/selection drag is in flight the ticker
   // runs every frame, scrolling the viewer when the pointer rests against a
@@ -1299,6 +1365,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   /// stream, stylus detection for palm rejection, multi-touch bail, and
   /// - with ink or the eraser armed - the stroke itself.
   void _onPointerDown(PointerDownEvent event) {
+    // a gesture outlives the page it started on (see [_bumpActiveStroke])
+    if (!mounted) return;
     // the crop overlay owns all input while a crop is armed
     if (_controller.isCroppingImage) return;
     _pointerPressure = _normalizedPressure(event);
@@ -1320,6 +1388,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       }
     }
     if (_controller.isPickingColor) {
+      _pickDownPosition = event.localPosition;
+      _pickDragged = false;
       _updatePickPreview(event.localPosition);
       return;
     }
@@ -1382,9 +1452,20 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   }
 
   void _onPointerMove(PointerMoveEvent event) {
+    if (!mounted) return;
     final pressure = _normalizedPressure(event);
     if (pressure != null) _pointerPressure = pressure;
     if (_controller.isPickingColor) {
+      final down = _pickDownPosition;
+      // A touch/stylus drag is the scroll view's, not a sample: mark it so
+      // pointer-up doesn't pick the colour the finger happened to lift over.
+      if (down != null &&
+          !_pickDragged &&
+          event.kind != PointerDeviceKind.mouse &&
+          event.kind != PointerDeviceKind.trackpad &&
+          (event.localPosition - down).distance > kTouchSlop) {
+        _pickDragged = true;
+      }
       _updatePickPreview(event.localPosition);
       return;
     }
@@ -1429,6 +1510,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       _moveStart = null;
       _moveCurrent = null;
       _moveCurrentGlobal = null;
+      _elementMoveStart = null;
+      _elementMoveCurrent = null;
       _resizeHandle = null;
       _resizeFrom = null;
       _resizeRect = null;
@@ -1793,6 +1876,12 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     _afterEraseRects = null;
     _afterEraseFade = null;
     _afterEraseInk = null;
+    _afterElementClean?.dispose();
+    _afterElementClean = null;
+    _afterElementOnly?.dispose();
+    _afterElementOnly = null;
+    _afterElementFrom = null;
+    _afterElementOffset = Offset.zero;
     _afterRevisionId = null;
   }
 
@@ -2145,11 +2234,143 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     );
   }
 
-  /// The selected content element's view rect when it lives on this page.
-  Rect? get _selectedElementViewRect {
+  /// How far outside its box a press still grabs the selected element.
+  /// Text runs are thin, so an exact box would be a hard target.
+  static const double _elementGrabSlop = 4;
+
+  /// The selected content element's view rect when it lives on this page,
+  /// at rest.
+  Rect? get _selectedElementRestRect {
     if (_controller.selectedElementPage != widget.pageIndex) return null;
     final bounds = _controller.selectedElement?.bounds;
     return bounds == null ? null : _geometry.toViewRect(bounds);
+  }
+
+  /// The selected content element's view rect, carried along by a move drag
+  /// in flight - this is the chrome the user drags.
+  Rect? get _selectedElementViewRect {
+    final rest = _selectedElementRestRect;
+    final offset = _elementMoveOffset;
+    return rest == null || offset == null ? rest : rest.shift(offset);
+  }
+
+  /// The live displacement of a content-element move drag, or null when no
+  /// such drag is in flight on this page.
+  Offset? get _elementMoveOffset {
+    final start = _elementMoveStart;
+    final current = _elementMoveCurrent;
+    return start == null || current == null ? null : current - start;
+  }
+
+  /// Starts a content-element move drag from [position] and kicks off the
+  /// page render that lets the artwork float with it.
+  void _beginElementMove(Offset position, PointerDeviceKind? kind) {
+    if (!_controller.canMoveSelectedElement) return;
+    _beginInteraction(PdfEditingInteractionIntent.move, kind);
+    setState(() {
+      _elementMoveStart = position;
+      _elementMoveCurrent = position;
+    });
+    unawaited(_ensureElementLift());
+  }
+
+  /// Renders the pair a content-element drag paints with: the page without
+  /// the selected element, and that element by itself on transparent paper.
+  /// Both come from one parse, filtered two ways
+  /// ([PdfPageElements.operationsRetaining]), so the artwork that travels
+  /// carries only its own pixels and the hole it leaves shows the real page
+  /// behind it rather than a wash of paper.
+  ///
+  /// Cached per revision and element: a drag, a nudge, and another drag all
+  /// render once.
+  Future<void> _ensureElementLift() async {
+    final element = _tool == PdfEditTool.content &&
+            _controller.selectedElementPage == widget.pageIndex
+        ? _controller.selectedElement
+        : null;
+    if (element == null) {
+      // nothing selected here: let the pair go rather than hold two page
+      // pictures for a selection the user has moved on from
+      if (_elementClean != null || _elementOnly != null) {
+        _elementClean?.dispose();
+        _elementOnly?.dispose();
+        _elementClean = null;
+        _elementOnly = null;
+        _elementLiftKey = null;
+      }
+      return;
+    }
+    final key = (
+      document: _controller.document,
+      revision: _controller.revisionId,
+      page: widget.pageIndex,
+      element: element.id,
+      color: widget.pageColor,
+      annotations: widget.showAnnotations,
+    );
+    if (_elementLiftKey == key &&
+        _elementClean != null &&
+        _elementOnly != null) {
+      return;
+    }
+    _elementLiftKey = key;
+    // the press-to-first-frame path must not wait on a page interpretation
+    await SchedulerBinding.instance.endOfFrame;
+    if (!mounted || _elementLiftKey != key) return;
+    try {
+      final elements = _controller.elementsOn(widget.pageIndex);
+      final page = _controller.pageAt(widget.pageIndex);
+      final id = element.id;
+      final clean = await PdfPageRenderer.renderPictureWithPlan(
+        page,
+        PdfPageRenderPlan(
+          pageColor: widget.pageColor,
+          annotations: widget.showAnnotations,
+        ),
+        operations: elements.operationsRetaining((e) => e.id != id),
+      );
+      final only = await PdfPageRenderer.renderPictureWithPlan(
+        page,
+        // no paper and no annotations: this picture is composited over the
+        // live page, so anything but the drawing itself would occlude it
+        const PdfPageRenderPlan(annotations: false, paper: false),
+        operations: elements.operationsRetaining((e) => e.id == id),
+      );
+      if (!mounted || _elementLiftKey != key) {
+        clean.dispose();
+        only.dispose();
+        return;
+      }
+      setState(() {
+        _elementClean?.dispose();
+        _elementOnly?.dispose();
+        _elementClean = clean;
+        _elementOnly = only;
+      });
+    } catch (_) {
+      // no lift: the drag still moves its chrome box, and the commit
+      // re-renders the page either way
+      _elementLiftKey = null;
+    }
+  }
+
+  /// Hands the drag's pictures to the commit afterimage, which paints the
+  /// page as it now looks - clean, plus the element at [offset] - until the
+  /// committed revision's raster lands. Ownership transfers: the cache entry
+  /// is dead anyway, since its key names the revision just superseded.
+  void _holdElementAfterimage(Rect from, Offset offset) {
+    final clean = _elementClean;
+    final only = _elementOnly;
+    if (clean == null || only == null) return;
+    _elementClean = null;
+    _elementOnly = null;
+    _elementLiftKey = null;
+    _clearAfterimage();
+    _afterElementClean = clean;
+    _afterElementOnly = only;
+    _afterElementFrom = from;
+    _afterElementOffset = offset;
+    _afterRevisionId = _controller.revisionId;
   }
 
   /// Keeps [_ghost] current: the selected annotation's appearance as a
@@ -2372,6 +2593,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     _ghost?.dispose();
     _clearAfterimage();
     _resizeCleanPicture?.dispose();
+    _elementClean?.dispose();
+    _elementOnly?.dispose();
     _clearSourceClean();
     _flashController.dispose();
     _activeStrokeRepaint.dispose();
@@ -3259,7 +3482,21 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
             PdfEditTool.measureArc ||
             PdfEditTool.measureVolume:
         break; // taps add vertices; double-tap finishes
-      case PdfEditTool.note || PdfEditTool.content || PdfEditTool.count:
+      case PdfEditTool.content:
+        // a press on the selected element - or on any other one, grabbing
+        // it in the same drag - repositions it; anywhere else stays a tap
+        final rect = _selectedElementViewRect;
+        if (rect != null && rect.inflate(_elementGrabSlop).contains(position)) {
+          _beginElementMove(position, details.kind);
+          return;
+        }
+        final (x, y) = _geometry.toPagePoint(position);
+        if (_controller.elementsOn(widget.pageIndex).elementsAt(x, y).isEmpty) {
+          break;
+        }
+        _controller.selectElementAt(widget.pageIndex, x, y);
+        _beginElementMove(position, details.kind);
+      case PdfEditTool.note || PdfEditTool.count:
         break; // driven by taps
     }
   }
@@ -3387,6 +3624,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   /// the menu is suppressed.
   bool _menuLongPressClaims(Offset position) {
     if (_pointers.gestureBailed) return false;
+    // The eyedropper owns the page: a press is a sample or a scroll.
+    if (_controller.isPickingColor) return false;
     final (x, y) = _geometry.toPagePoint(position);
     if (_tool == PdfEditTool.form) return false;
     if (!_selectMode || _host.showAnnotationMenu == null) {
@@ -3511,6 +3750,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
         _resizeFlipY = flipY;
         _resizeRect = _anchorResized(resized);
       });
+    } else if (_elementMoveStart != null) {
+      setState(() => _elementMoveCurrent = position);
     } else if (_moveStart != null) {
       _moveCurrentGlobal = _autoScrollGlobal;
       setState(() => _moveCurrent = position);
@@ -3530,6 +3771,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   bool get _autoScrollDragActive =>
       _marqueeStart != null ||
       _moveStart != null ||
+      _elementMoveStart != null ||
       _resizeHandle != null ||
       _vertexHandle != null ||
       _dragStart != null;
@@ -3598,6 +3840,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     final moveStart = _moveStart;
     final moveCurrent = _moveCurrent;
     final moveCurrentGlobal = _moveCurrentGlobal;
+    final elementMoveStart = _elementMoveStart;
+    final elementMoveCurrent = _elementMoveCurrent;
     final resizeRect = _resizeHandle != null ? _resizeRect : null;
     final resizeAngle = _resizeAngle;
     final resizeFlipX = _resizeFlipX;
@@ -3633,6 +3877,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       _moveStart = null;
       _moveCurrent = null;
       _moveCurrentGlobal = null;
+      _elementMoveStart = null;
+      _elementMoveCurrent = null;
       _resizeHandle = null;
       _resizeFrom = null;
       _resizeRect = null;
@@ -3750,6 +3996,28 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
             localAngle: resizeAngle,
             flipX: resizeFlipX,
             flipY: resizeFlipY);
+      }
+    } else if (elementMoveStart != null && elementMoveCurrent != null) {
+      if ((elementMoveCurrent - elementMoveStart).distance < 2) {
+        return; // a click: the press already selected what it landed on
+      }
+      // mapping both endpoints keeps the delta right on a rotated page
+      final (x0, y0) = _geometry.toPagePoint(elementMoveStart);
+      final (x1, y1) = _geometry.toPagePoint(elementMoveCurrent);
+      final from = _selectedElementRestRect;
+      final before = _controller.revisionId;
+      _controller.moveSelectedElement(x1 - x0, y1 - y0);
+      if (from != null && before != _controller.revisionId) {
+        // Where the commit actually put it, not where the pointer went: a
+        // drag toward a neighbouring page is tethered to this page's edge,
+        // and an afterimage drawn at the raw pointer delta would show the
+        // element off the paper until the raster landed under it.
+        final to = _selectedElementRestRect;
+        _holdElementAfterimage(
+            from,
+            to == null
+                ? elementMoveCurrent - elementMoveStart
+                : to.topLeft - from.topLeft);
       }
     } else if (moveStart != null && moveCurrent != null) {
       if ((moveCurrent - moveStart).distance < 2) return; // a click
@@ -4173,12 +4441,9 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     final options = field.options;
     if (options.isEmpty) return;
     final name = field.name;
-    final overlay =
-        Overlay.of(context).context.findRenderObject()! as RenderBox;
     final picked = await showMenu<String>(
       context: context,
-      position: RelativeRect.fromRect(
-          globalPosition & Size.zero, Offset.zero & overlay.size),
+      position: pdfPopupPosition(context, globalPosition),
       items: [
         for (final (export, display) in options)
           PopupMenuItem(
@@ -4197,8 +4462,14 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   }
 
   /// Rasterizes this page once for the eyedropper, keyed on the revision id
-  /// (it changes every revision). The page raster at scale 1 shares the
-  /// view's orientation, so view → raster is just the geometry scale.
+  /// (it changes every revision). The page raster shares the view's
+  /// orientation, so view → raster is just the geometry scale.
+  ///
+  /// Called only for the page the pointer is actually over ([_updatePickPreview]
+  /// and the mouse entering this page). Arming the eyedropper used to warm
+  /// every mounted overlay from [build] instead, so a multi-page view kicked
+  /// off one full page render per mounted page at once - and every one of them
+  /// ran the interpreter walk on the UI isolate, which is what the freeze was.
   Future<PdfPageColorSampler> _ensureSampler() {
     final document = _controller.document;
     final revisionId = _controller.revisionId;
@@ -4214,7 +4485,9 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       _samplerFuture = PdfPageColorSampler.of(document.page(widget.pageIndex),
               pageColor: pageColor,
               annotations: annotations,
-              rotation: widget.geometry.rotation)
+              rotation: widget.geometry.rotation,
+              worker: widget.renderWorker,
+              pageIndex: widget.pageIndex)
           .then((s) {
         // resolve the preview that was waiting on the raster
         if (mounted &&
@@ -4225,7 +4498,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
             _sampler = s;
             final position = _pickPosition;
             if (position != null) {
-              _pickPreview = s.colorAt(position / _geometry.scale);
+              _pickPreview = _sampleAt(position);
             }
           });
         }
@@ -4235,14 +4508,37 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     return _samplerFuture!;
   }
 
+  /// Releases the sampling raster (a page's worth of RGBA - megabytes) once
+  /// the eyedropper is put away. The overlay itself often stays mounted for
+  /// an armed tool or a live selection, so it cannot rely on being disposed.
+  void _dropSampler() {
+    if (_samplerFuture == null && _sampler == null) return;
+    _sampler = null;
+    _samplerFuture = null;
+    _samplerRevisionId = null;
+    _samplerPageColor = null;
+    _samplerAnnotations = null;
+  }
+
   /// Moves the eyedropper's swatch. Hover-frequency, so it repaints the
   /// cursor layer (and the chip, which rides its own ValueListenableBuilder)
   /// instead of rebuilding the overlay - see [_cursorRepaint].
   void _updatePickPreview(Offset position) {
     unawaited(_ensureSampler());
     _pickPosition = position;
-    _pickPreview = _sampler?.colorAt(position / _geometry.scale);
+    _pickPreview = _sampleAt(position);
     _bumpCursor();
+  }
+
+  /// The sampled colour under a view-space [position], read at the patch
+  /// width the current zoom makes sense of: at 1:1 the 3x3 default, tighter
+  /// as the page is magnified (the pointer then covers a fraction of a point,
+  /// and averaging 3 points would sample the paper either side of a stem).
+  Color? _sampleAt(Offset position) {
+    final sampler = _sampler;
+    if (sampler == null) return null;
+    return sampler.colorAt(position / _geometry.scale,
+        radius: sampler.patchRadiusForZoom(widget.zoom * _geometry.scale));
   }
 
   /// Releasing the pointer commits the raw gesture (stroke or erase
@@ -4250,21 +4546,34 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
   /// plain tap and press-drag-release (watching the preview) work. A
   /// raw listener, so it fires regardless of the gesture arena.
   Future<void> _onPointerUp(PointerUpEvent event) async {
+    if (!mounted) return;
     _endRawPointer(event, canceled: false);
     if (!_controller.isPickingColor) return;
+    final dragged = _pickDragged;
+    _pickDownPosition = null;
+    _pickDragged = false;
+    // The lift that ends a scroll flings the document on; it must not also
+    // pick a colour and put the eyedropper away.
+    if (dragged) return;
     final revisionAtStart = _controller.revisionId;
     final sampler = await _ensureSampler();
     if (!mounted || revisionAtStart != _controller.revisionId) return;
+    if (!_controller.isPickingColor) return;
     setState(() {
       _pickPosition = null;
       _pickPreview = null;
     });
-    final color = sampler.colorAt(event.localPosition / _geometry.scale);
+    final color = sampler.colorAt(event.localPosition / _geometry.scale,
+        radius: sampler.patchRadiusForZoom(widget.zoom * _geometry.scale));
     if (color != null) _controller.finishColorPick(color);
   }
 
-  void _onPointerCancel(PointerCancelEvent event) =>
-      _endRawPointer(event, canceled: true);
+  void _onPointerCancel(PointerCancelEvent event) {
+    if (!mounted) return;
+    _pickDownPosition = null;
+    _pickDragged = false;
+    _endRawPointer(event, canceled: true);
+  }
 
   Future<void> _onTapUp(TapUpDetails details) async {
     // the crop overlay owns taps while a crop is armed
@@ -4530,10 +4839,17 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       cursor = SystemMouseCursors.precise;
     } else if (_tool == PdfEditTool.content) {
       final (x, y) = _geometry.toPagePoint(event.localPosition);
-      cursor =
-          _controller.elementsOn(widget.pageIndex).elementsAt(x, y).isNotEmpty
-              ? SystemMouseCursors.click
-              : SystemMouseCursors.basic;
+      final selected = _selectedElementViewRect;
+      if (selected != null &&
+          selected.inflate(_elementGrabSlop).contains(event.localPosition) &&
+          _controller.canMoveSelectedElement) {
+        cursor = SystemMouseCursors.move; // drag to reposition it
+      } else {
+        cursor =
+            _controller.elementsOn(widget.pageIndex).elementsAt(x, y).isNotEmpty
+                ? SystemMouseCursors.click
+                : SystemMouseCursors.basic;
+      }
     } else if (_tool == PdfEditTool.form) {
       final (x, y) = _geometry.toPagePoint(event.localPosition);
       final selectedRect = _selectedViewRect;
@@ -5123,6 +5439,10 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     _textEditText.previewLetterSpacing = _textEditCharSpacing * _geometry.scale;
     _ensureGhost();
     _ensureSourceClean();
+    // Start the content-element pair as soon as one is selected, not when a
+    // drag begins: a quick press-and-flick would otherwise commit before the
+    // render lands, leaving the page to blank on its own.
+    unawaited(_ensureElementLift());
     // the afterimage has served once the committed revision's raster is
     // on screen - or is stale once the document moved past that revision
     if (_afterRevisionId != null &&
@@ -5182,6 +5502,7 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
     final selectedAnnotation = _controller.selectedAnnotation;
     final cropping = _controller.isCroppingImage &&
         _controller.selectedPage == widget.pageIndex;
+    final picking = _controller.isPickingColor;
     final washRestGhost = selectedAnnotation?.subtype == 'FreeText';
     final _AfterGhost? restGhost = !widget.rasterCurrent &&
             !dragging &&
@@ -5260,8 +5581,10 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
       _flashRect = _controller.annotationAt(flash.page, flash.slot)?.rect;
       if (_flashRect != null) _flashController.forward(from: 0);
     }
-    // warm the eyedropper's raster so the first preview is instant-ish
-    if (_controller.isPickingColor) unawaited(_ensureSampler());
+    // The sampling raster is built for the page the pointer reaches, not for
+    // every mounted page the moment the eyedropper is armed; put it away
+    // again as soon as the tool is.
+    if (!_controller.isPickingColor) _dropSampler();
     // placed vertices are already snapped; only the live rubber-band edge to
     // the hover point snaps here (and only while Shift is held)
     final polyPreview = _polyPoints == null
@@ -5311,18 +5634,28 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
         dragStartBehavior: DragStartBehavior.down,
         // while cropping, the crop overlay owns the page: drop this detector's
         // recognizers entirely so they never win the gesture arena over the
-        // crop rectangle's own handles and confirm/cancel chips
-        onPanStart: cropping ? null : _panStart,
-        onPanUpdate: cropping ? null : _panUpdate,
-        onPanEnd: cropping ? null : _panEnd,
-        onTapUp: cropping ? null : _onTapUp,
+        // crop rectangle's own handles and confirm/cancel chips.
+        //
+        // The eyedropper drops them too. It has no drag of its own (a sample
+        // is a tap, and the hover/press preview is driven by the raw
+        // [Listener] above, which never enters the arena), but a pan
+        // recognizer that claims the gesture and does nothing with it left
+        // the document unscrollable for as long as the tool was armed - so
+        // the eyedropper only ever reached the pages that happened to be on
+        // screen when it was armed.
+        onPanStart: cropping || picking ? null : _panStart,
+        onPanUpdate: cropping || picking ? null : _panUpdate,
+        onPanEnd: cropping || picking ? null : _panEnd,
+        onTapUp: cropping || picking ? null : _onTapUp,
         onDoubleTapDown: !cropping &&
+                !picking &&
                 (_polyTool ||
                     _tool == PdfEditTool.cloudPolygon ||
                     _tool == PdfEditTool.form)
             ? _onDoubleTapDown
             : null,
         onDoubleTap: !cropping &&
+                !picking &&
                 (_polyTool ||
                     _tool == PdfEditTool.cloudPolygon ||
                     _tool == PdfEditTool.form)
@@ -5330,6 +5663,10 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
             : null,
         child: MouseRegion(
           cursor: _cursor,
+          // the mouse arriving over this page is the cue to build its
+          // sampling raster - by the time the pointer stops moving the first
+          // preview is ready
+          onEnter: picking ? (_) => unawaited(_ensureSampler()) : null,
           onHover: _onHover,
           onExit: (_) {
             if (_pickPosition == null &&
@@ -5470,6 +5807,18 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                     vertexHandles:
                         _moveStart == null ? vertexHandles : const <Offset>[],
                     elementRect: _selectedElementViewRect,
+                    elementClean: _elementMoveOffset != null
+                        ? _elementClean
+                        : _afterElementClean,
+                    elementOnly: _elementMoveOffset != null
+                        ? _elementOnly
+                        : _afterElementOnly,
+                    elementLiftFrom: _elementMoveOffset != null
+                        ? _selectedElementRestRect
+                        : _afterElementFrom,
+                    elementLiftOffset:
+                        _elementMoveOffset ?? _afterElementOffset,
+                    elementLiftSettled: _elementMoveOffset == null,
                     flashRect:
                         _flashController.isAnimating && _flashRect != null
                             ? _geometry.toViewRect(_flashRect!)
@@ -5547,7 +5896,16 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                 ),
               // the eyedropper's swatch: a widget, so it can't join the
               // cursor painter - it subscribes to the same notifier instead,
-              // rebuilding just the chip as the pointer moves
+              // rebuilding just the chip as the pointer moves.
+              //
+              // It lives inside the viewer's zoom transform like the rest of
+              // the overlay, so - like every other piece of chrome here - it
+              // counter-scales by [_chromeScale]: the swatch stays the size
+              // the theme drew it at whether the page is at 25% or 800%,
+              // instead of becoming a billboard that hides what is being
+              // sampled. Its offset from the pointer scales with it, and it
+              // anchors at the top-left so the counter-scale doesn't drag it
+              // away from the cursor.
               Positioned.fill(
                 child: IgnorePointer(
                   child: ValueListenableBuilder<int>(
@@ -5556,11 +5914,19 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                       final preview =
                           _controller.isPickingColor ? _pickPosition : null;
                       if (preview == null) return const SizedBox.shrink();
+                      final scale = _chromeScale;
                       return Stack(children: [
                         Positioned(
-                          left: preview.dx + 14,
-                          top: preview.dy - 38,
-                          child: _EyedropperChip(color: _pickPreview),
+                          left: preview.dx + 14 * scale,
+                          top: preview.dy - 38 * scale,
+                          child: Transform.scale(
+                            scale: scale,
+                            alignment: Alignment.topLeft,
+                            child: _EyedropperChip(
+                              key: const ValueKey('pdf-eyedropper-chip'),
+                              color: _pickPreview,
+                            ),
+                          ),
                         ),
                       ]);
                     },
@@ -5675,6 +6041,14 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                                     : null,
                                 cursorColor: _textEditColor,
                                 cursorWidth: 2 * _chromeScale,
+                                cursorHeight: pdfZoomAwareCursorHeight(
+                                  context,
+                                  lineHeight:
+                                      _textEditText.maxStyleSize *
+                                          _geometry.scale *
+                                          _textEditLineSpacing,
+                                  chromeScale: _chromeScale,
+                                ),
                                 selectionControls: _ScaledTextSelectionControls(
                                     _chromeScale,
                                     _inlineTextHandleColor(context)),
@@ -5749,7 +6123,8 @@ class _EditingPageOverlayState extends State<EditingPageOverlay>
                   _textEditFieldName == null &&
                   _controller.hasTouchInput)
                 _buildInlineTextStyleChip(_textEditRect!),
-              if (showChip) _buildSelectionChip(chrome?.$1 ?? selected),
+              if (showChip && widget.showSelectionChip)
+                _buildSelectionChip(chrome?.$1 ?? selected),
               if (_measureReadout() case (final text, final anchor))
                 _buildReadoutChip(text, anchor),
               if (_styleReadout() case (final text, final anchor))
@@ -5802,7 +6177,7 @@ class _MenuLongPressRecognizer extends LongPressGestureRecognizer {
 /// The eyedropper's floating preview: the color under the pointer and
 /// its hex value, riding beside the cursor.
 class _EyedropperChip extends StatelessWidget {
-  const _EyedropperChip({required this.color});
+  const _EyedropperChip({super.key, required this.color});
 
   /// Null while the page raster is still being built (or off the page).
   final Color? color;
@@ -6474,6 +6849,11 @@ class _EditingPreviewPainter extends CustomPainter {
     required this.showRotateHandle,
     required this.vertexHandles,
     required this.elementRect,
+    this.elementClean,
+    this.elementOnly,
+    this.elementLiftFrom,
+    this.elementLiftOffset = Offset.zero,
+    this.elementLiftSettled = false,
     this.flashRect,
     this.flashProgress = 0,
     this.redactionRects = const [],
@@ -6622,6 +7002,27 @@ class _EditingPreviewPainter extends CustomPainter {
   /// The selected content element's box - orange, to read as "page
   /// content", distinct from the blue annotation chrome.
   final Rect? elementRect;
+
+  /// A content-element move: the page WITHOUT the moved element
+  /// ([elementClean]) and that element ALONE on transparent paper
+  /// ([elementOnly]), both in page-point space like [resizeClean], plus the
+  /// element's resting footprint ([elementLiftFrom], a view rect) and how far
+  /// it has moved ([elementLiftOffset]).
+  ///
+  /// Drawing them apart is what keeps a neighbour that merely shares the
+  /// element's bounding box from travelling with it. While the drag is live
+  /// the clean page fills just the footprint - everywhere else the page's own
+  /// raster is already right. After the commit ([elementLiftSettled]) it
+  /// covers the whole page instead: a content edit drops the cached raster,
+  /// and this stands in until the new one lands.
+  ///
+  /// Null until the pair renders - the chrome box alone carries the drag
+  /// until then.
+  final ui.Picture? elementClean;
+  final ui.Picture? elementOnly;
+  final Rect? elementLiftFrom;
+  final Offset elementLiftOffset;
+  final bool elementLiftSettled;
 
   /// An attention pulse around [flashRect] (the annotation a sidebar
   /// tile zoomed to), animated by [flashProgress] 0→1: an amber ring
@@ -7009,6 +7410,34 @@ class _EditingPreviewPainter extends CustomPainter {
       canvas.restore();
     }
 
+    // A content-element move, in two layers: the page without the element,
+    // which erases it truthfully (neighbours sharing its box keep their
+    // pixels), and the element by itself, carried to where it has been
+    // dragged. Under the chrome, which is drawn last.
+    final liftFrom = elementLiftFrom;
+    final liftClean = elementClean;
+    final liftOnly = elementOnly;
+    if (liftFrom != null && liftClean != null && liftOnly != null) {
+      canvas.save();
+      if (!elementLiftSettled) {
+        // mid-drag the page's own raster is still right everywhere but the
+        // footprint, so clip to it and let Skia cull the rest of the replay.
+        // A hair of inflation swallows the original's anti-aliased edge.
+        canvas.clipRect(liftFrom.inflate(1));
+      }
+      // settled: no clip. The commit dropped the page raster, so this covers
+      // the whole page until the replacement lands.
+      canvas.scale(geometry.scale);
+      canvas.drawPicture(liftClean);
+      canvas.restore();
+
+      canvas.save();
+      canvas.translate(elementLiftOffset.dx, elementLiftOffset.dy);
+      canvas.scale(geometry.scale);
+      canvas.drawPicture(liftOnly);
+      canvas.restore();
+    }
+
     // the wash goes under every stroke preview: the eraser's sliced
     // remainders (and any other pending ink) paint at full strength
     // over their faded originals. Sliceable ink fades along its own
@@ -7305,6 +7734,11 @@ class _EditingPreviewPainter extends CustomPainter {
       oldDelegate.showHandles != showHandles ||
       oldDelegate.showRotateHandle != showRotateHandle ||
       oldDelegate.elementRect != elementRect ||
+      oldDelegate.elementClean != elementClean ||
+      oldDelegate.elementOnly != elementOnly ||
+      oldDelegate.elementLiftFrom != elementLiftFrom ||
+      oldDelegate.elementLiftOffset != elementLiftOffset ||
+      oldDelegate.elementLiftSettled != elementLiftSettled ||
       oldDelegate.flashRect != flashRect ||
       oldDelegate.flashProgress != flashProgress ||
       oldDelegate.strokes.length != strokes.length ||

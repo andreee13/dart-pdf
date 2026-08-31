@@ -1365,6 +1365,9 @@ class DartPdfEditorLocalizationsDe extends DartPdfEditorLocalizations {
   String get tbAutosizeTextBox => 'Textfeld automatisch anpassen (Alt+Z)';
 
   @override
+  String get tbAutosizeTextFont => 'Schrift an Textfeld anpassen';
+
+  @override
   String get tbCalibrateScaleHint =>
       'Zeichnen Sie eine Linie bekannter Länge, um den Maßstab zu kalibrieren.';
 
@@ -1604,6 +1607,9 @@ class DartPdfEditorLocalizationsDe extends DartPdfEditorLocalizations {
 
   @override
   String get tbNameEraser => 'Freihandstriche löschen';
+
+  @override
+  String get tbNameHand => 'Hand-Werkzeug';
 
   @override
   String get tbNameHighlight => 'Hervorheben';

@@ -1344,7 +1344,8 @@ class DartPdfEditorLocalizationsEn extends DartPdfEditorLocalizations {
   String get tbAlignVerticalCenters => 'Align vertical centers';
 
   @override
-  String get tbAnnotationsFlattened => 'Annotations flattened into the pages';
+  String get tbAnnotationsFlattened =>
+      'Annotations and form fields flattened into the pages';
 
   @override
   String get tbApplyRedactionsMessage =>
@@ -1358,6 +1359,9 @@ class DartPdfEditorLocalizationsEn extends DartPdfEditorLocalizations {
 
   @override
   String get tbAutosizeTextBox => 'Autosize text box (Alt+Z)';
+
+  @override
+  String get tbAutosizeTextFont => 'Fit font to text box';
 
   @override
   String get tbCalibrateScaleHint =>
@@ -1484,7 +1488,7 @@ class DartPdfEditorLocalizationsEn extends DartPdfEditorLocalizations {
 
   @override
   String get tbFlattenAnnotationsTooltip =>
-      'Flatten annotations into the pages';
+      'Flatten annotations and form fields into the pages';
 
   @override
   String get tbFlattenForm => 'Flatten form';
@@ -1551,25 +1555,25 @@ class DartPdfEditorLocalizationsEn extends DartPdfEditorLocalizations {
   String get tbMarkupHighlight => 'Highlight';
 
   @override
-  String get tbMarkupHighlightTip => 'Highlight selection';
+  String get tbMarkupHighlightTip => 'Highlight text';
 
   @override
   String get tbMarkupSquiggly => 'Squiggly-underline';
 
   @override
-  String get tbMarkupSquigglyTip => 'Squiggly-underline selection';
+  String get tbMarkupSquigglyTip => 'Squiggly-underline text';
 
   @override
   String get tbMarkupStrikeOut => 'Strike out';
 
   @override
-  String get tbMarkupStrikeOutTip => 'Strike out selection';
+  String get tbMarkupStrikeOutTip => 'Strike out text';
 
   @override
   String get tbMarkupUnderline => 'Underline';
 
   @override
-  String get tbMarkupUnderlineTip => 'Underline selection';
+  String get tbMarkupUnderlineTip => 'Underline text';
 
   @override
   String get tbMoreColors => 'More colors…';
@@ -1597,6 +1601,9 @@ class DartPdfEditorLocalizationsEn extends DartPdfEditorLocalizations {
 
   @override
   String get tbNameEraser => 'Erase ink strokes';
+
+  @override
+  String get tbNameHand => 'Hand';
 
   @override
   String get tbNameHighlight => 'Highlight';
@@ -1656,7 +1663,8 @@ class DartPdfEditorLocalizationsEn extends DartPdfEditorLocalizations {
   String get tbNewFieldType => 'New field type - drag on a page to add one';
 
   @override
-  String get tbNoAnnotationsToFlatten => 'No annotations to flatten';
+  String get tbNoAnnotationsToFlatten =>
+      'No annotations or form fields to flatten';
 
   @override
   String get tbNoCustomStamps => 'No custom stamps';
@@ -1720,7 +1728,7 @@ class DartPdfEditorLocalizationsEn extends DartPdfEditorLocalizations {
   String get tbScale => 'Scale';
 
   @override
-  String get tbSelectTextForMarkup => 'Select text to use markup';
+  String get tbSelectTextForMarkup => 'Choose a markup, then select text';
 
   @override
   String tbSelectionCount(int count) {

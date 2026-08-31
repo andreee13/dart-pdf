@@ -1365,6 +1365,9 @@ class DartPdfEditorLocalizationsIt extends DartPdfEditorLocalizations {
   String get tbAutosizeTextBox => 'Adatta casella di testo (Alt+Z)';
 
   @override
+  String get tbAutosizeTextFont => 'Adatta il carattere alla casella di testo';
+
+  @override
   String get tbCalibrateScaleHint =>
       'Disegna una linea di lunghezza nota per calibrare la scala.';
 
@@ -1604,6 +1607,9 @@ class DartPdfEditorLocalizationsIt extends DartPdfEditorLocalizations {
 
   @override
   String get tbNameEraser => 'Cancella tratti a inchiostro';
+
+  @override
+  String get tbNameHand => 'Mano';
 
   @override
   String get tbNameHighlight => 'Evidenzia';

@@ -1364,6 +1364,9 @@ class DartPdfEditorLocalizationsId extends DartPdfEditorLocalizations {
   String get tbAutosizeTextBox => 'Ukuran otomatis kotak teks (Alt+Z)';
 
   @override
+  String get tbAutosizeTextFont => 'Sesuaikan font ke kotak teks';
+
+  @override
   String get tbCalibrateScaleHint =>
       'Gambar garis dengan panjang yang diketahui untuk mengkalibrasi skala.';
 
@@ -1603,6 +1606,9 @@ class DartPdfEditorLocalizationsId extends DartPdfEditorLocalizations {
 
   @override
   String get tbNameEraser => 'Hapus goresan tinta';
+
+  @override
+  String get tbNameHand => 'Tangan';
 
   @override
   String get tbNameHighlight => 'Sorot';

@@ -207,11 +207,26 @@ class PdfImageRequest {
     this.isStencil = false,
     this.stencilColor = PdfColor.black,
     this.isInline = false,
+    this.isLuminosityMask = false,
     PdfDecodedPixels? decoded,
     this.sourceReference,
   })  : _decoded = decoded,
         decodedWidth = decoded?.width,
         decodedHeight = decoded?.height;
+
+  PdfImageRequest._copy({
+    required this.stream,
+    required this.transform,
+    required this.alpha,
+    required this.isStencil,
+    required this.stencilColor,
+    required this.isInline,
+    required this.isLuminosityMask,
+    required PdfDecodedPixels? decoded,
+    required this.decodedWidth,
+    required this.decodedHeight,
+    required this.sourceReference,
+  }) : _decoded = decoded;
 
   final CosStream stream;
 
@@ -254,10 +269,48 @@ class PdfImageRequest {
   /// remains reproducible from [stream] or [sourceReference].
   void releaseDecodedPixels() => _decoded = null;
 
+  /// Keeps locally decoded RGBA available for a one-time accelerated upload.
+  ///
+  /// Unlike worker-carried pixels, these dimensions are deliberately not
+  /// folded into [decodedWidth]/[decodedHeight]: the request may already have
+  /// been used as an image-map key before the local decoder produced them.
+  /// Callers must only attach pixels matching the engine image built for this
+  /// request, and release them with [releaseDecodedPixels] after upload.
+  void retainDecodedPixels(PdfDecodedPixels pixels) {
+    _decoded ??= pixels;
+  }
+
+  /// Copies this request with new geometry while preserving its image-map key.
+  ///
+  /// Local retained pixels are attached after the original request has keyed
+  /// an image map, so reconstructing through the public constructor would
+  /// incorrectly infer sized-key dimensions from them. Geometry adapters use
+  /// this method to keep worker-sized and locally-unsized identities intact.
+  PdfImageRequest withTransform(PdfMatrix value) => PdfImageRequest._copy(
+        stream: stream,
+        transform: value,
+        alpha: alpha,
+        isStencil: isStencil,
+        stencilColor: stencilColor,
+        isInline: isInline,
+        isLuminosityMask: isLuminosityMask,
+        decoded: decoded,
+        decodedWidth: decodedWidth,
+        decodedHeight: decodedHeight,
+        sourceReference: sourceReference,
+      );
+
   /// True for inline images (`BI .. ID .. EI`). Their [stream] is
   /// synthesized fresh on every interpretation pass, so consumers that
   /// cache decoded pixels must key them by value, not stream identity.
   final bool isInline;
+
+  /// True when this image is being painted into a luminosity soft-mask
+  /// group. Device samples must then retain their native mask luminance
+  /// instead of being colour-managed for page preview. In particular,
+  /// DeviceGray 0/1 must remain exact black/white even when the document has
+  /// a CMYK OutputIntent.
+  final bool isLuminosityMask;
 
   /// Maps the unit square (image space, y-up) to page space.
   final PdfMatrix transform;
@@ -368,5 +421,22 @@ abstract interface class PdfDevice {
     double backdropLuminance = 0,
     double transferScale = 1,
     double transferOffset = 0,
+  });
+}
+
+/// Optional richer transparency-group entry used by painting/recording
+/// devices that can model isolated and non-isolated group backdrops.
+///
+/// Basic devices continue to receive [PdfDevice.beginGroup]. [bounds] and a
+/// uniform [backdropColor] let a canvas backend seed a non-isolated offscreen
+/// layer with the group's initial backdrop; [isolated] explicitly requests a
+/// transparent initial backdrop (§11.4.6).
+abstract interface class PdfTransparencyGroupDevice {
+  void beginTransparencyGroup(
+    double alpha, {
+    required bool knockout,
+    required bool isolated,
+    PdfRect? bounds,
+    PdfColor? backdropColor,
   });
 }

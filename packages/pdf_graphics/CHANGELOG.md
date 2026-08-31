@@ -1,5 +1,52 @@
 # Changelog
 
+## 4.0.0
+
+- Allow retained renderers to request a larger overprint colourant grid when
+  retrying a scene that the default exact-GPU route conservatively rejected.
+- **Breaking:** `PdfOverprintCompositor.image` now requires the image
+  transform, source dimensions, and a spatial resolver. Custom compositor
+  callers must pass those values so one image can be resolved against several
+  colourant backdrops.
+- Complete the Ghent PDF Output Suite V5 colour and transparency pass with
+  output-intent colour management, rendering intents, black-point
+  compensation, spatial image overprint, 16-bit image handling, and exact
+  isolated/knockout transparency-group composition.
+- Add public `PdfColorContext`, `PdfRenderingIntent`, spatial overprint and
+  transparency-group device interfaces, plus intent-aware colour-space and ICC
+  conversion APIs.
+- Replay spatially varying stroked overprint through the compositor's exact
+  per-backdrop regions instead of leaving those strokes to an RGB `darken`
+  approximation. The region clips preserve the original vector stroke edge
+  and let retained GPU scenes accept three additional Ghent pages exactly.
+- Preserve one colorant-grid sample for a single straight stroke narrower than
+  a grid cell so spatial overprint can discover every crossed backdrop; keep
+  compound sub-cell paths conservative rather than inflating their joins and
+  caps into unrelated backdrops. Substitute regions remain clipped through
+  the original vector stroke at replay.
+- Retain an intersected colorant-grid cell for a single embedded glyph whose
+  real outline is smaller than the grid sampling interval. The original glyph
+  remains the visible geometry while its overprint resolves against the
+  correct backdrop.
+
+- Export an OpenType CFF face reader that retains Unicode cmap mappings and
+  selects collection entries, allowing native substitution adapters to obtain
+  exact glyph outlines and advances from CFF-flavoured system fonts.
+- Give synthesized FreeText and form-widget fallback text exact Base-14
+  character offsets, keeping Canvas placement, selection geometry, and
+  retained outline backends on the same per-character advances.
+- Export the TrueType outline reader and add indexed TrueType Collection
+  parsing so retained backends can derive exact glyph paths from a host's
+  registered TTF/TTC bytes.
+
+## 3.8.0
+
+- Cull retained CAD shapes outside the active raster strip before painting,
+  with `ShapeStripCache.viewportCulls` diagnostics for measuring the saved
+  work.
+- Reduce retained-scene and image-strip overhead while scrolling and deep
+  zooming image-heavy engineering drawings.
+
 ## 3.7.0
 
 - Move the Adobe glyph-name tables to `pdf_document`, where the content editor

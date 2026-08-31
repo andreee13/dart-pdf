@@ -1,9 +1,59 @@
 # Changelog
 
+## 4.0.0
+
+- Add an optional asynchronous tile-backend retry hook and exact retained-scene
+  re-recording, while preserving the existing Canvas fallback when a retry is
+  unavailable, fails, or remains inexact.
+- **Breaking:** classes that `implements PdfTileRasterBackend` must add
+  `supportsWarmUp`, `supportsSessionWarmUp`, and `warmUp()`. Extending the base
+  class keeps the default no-op implementations.
+
+- Fit a free-text font to its existing box from the selection toolbar, tighten
+  Alt+Z box autosizing to the font's real vertical metrics, and add selected
+  annotation flattening to the right-click menu.
+- Add compact docked editing controls and horizontal thumbnail layouts, with
+  steadier panel sizing, scrolling, selection, and recent-document previews.
+- Collect worker-decoded images inside retained tiling cells, so bitmap Type 3
+  glyphs keep their image pixels when a command buffer is rebuilt on the UI
+  isolate.
+- Let optional tile backends prepare view-scoped resources and live-page scene
+  sessions after first useful pixels and a 750 ms quiet window. Foreground
+  rendering cancels and restarts the delay, keeping first paint and immediate
+  navigation uncontended while avoiding cold setup during deep zoom.
+- Carry exact output-intent colour, overprint, transparency, soft-mask, and
+  high-bit-depth image rendering through Canvas, retained, worker, and tile
+  paths.
+
+## 3.8.0
+
+- Let annotations extend beyond the page edge while remaining selectable,
+  movable, resizable, and editable.
+- Add configurable signature ink colour and thickness, and allow the shared
+  properties UI to restyle compatible mixed annotation selections.
+- Add print-preview support, a searchable recent-files browser surface, and
+  `PdfViewerFeatures.showSelectionChip` for host control of the touch selection
+  chip.
+- Keep page and annotation caches stable across incremental saves, page
+  reordering, undo, and redo through revision-aware invalidation.
+- Improve rendering throughput and scroll stability on large image-heavy and
+  CAD documents with viewport culling, lighter retained scenes, better worker
+  scheduling, and more efficient deep-zoom tiles.
+- Fix popup placement in nested overlays, free-text caret alignment at deep
+  zoom, browser JPEG decoding, and a release-mode annotation-picture disposal
+  crash.
+
+## 3.7.1
+
+- Fix a release-mode crash when an annotated viewer unmounts while a cached
+  annotation picture is still being disposed.
+
 ## 3.7.0
 
 - Anchor thumbnail context menus to the correct position when the editor is
   hosted inside an offset nested navigator.
+- Anchor viewer text, annotation, and form popups in that same nested-navigator
+  configuration instead of shifting them by the overlay origin.
 - Render ordinary pages *through* a scroll instead of waiting it out.
   `PdfPageRenderScheduler` gains a motion lane: a request declares a
   `PdfRenderMotionClass`, evaluated at grant time rather than baked in, so a

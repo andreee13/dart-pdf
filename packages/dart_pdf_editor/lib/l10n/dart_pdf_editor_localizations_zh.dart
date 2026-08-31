@@ -1352,6 +1352,9 @@ class DartPdfEditorLocalizationsZh extends DartPdfEditorLocalizations {
   String get tbAutosizeTextBox => '自动调整文本框大小 (Alt+Z)';
 
   @override
+  String get tbAutosizeTextFont => '使字体适应文本框';
+
+  @override
   String get tbCalibrateScaleHint => '绘制一条已知长度的线段以校准比例。';
 
   @override
@@ -1585,6 +1588,9 @@ class DartPdfEditorLocalizationsZh extends DartPdfEditorLocalizations {
 
   @override
   String get tbNameEraser => '擦除手绘笔迹';
+
+  @override
+  String get tbNameHand => '抓手工具';
 
   @override
   String get tbNameHighlight => '高亮';
@@ -3372,6 +3378,9 @@ class DartPdfEditorLocalizationsZhHant extends DartPdfEditorLocalizationsZh {
   String get tbAutosizeTextBox => '自動調整文字方塊大小 (Alt+Z)';
 
   @override
+  String get tbAutosizeTextFont => '讓字型符合文字方塊';
+
+  @override
   String get tbCalibrateScaleHint => '繪製一條已知長度的線條以校準比例。';
 
   @override
@@ -3605,6 +3614,9 @@ class DartPdfEditorLocalizationsZhHant extends DartPdfEditorLocalizationsZh {
 
   @override
   String get tbNameEraser => '擦除手繪筆畫';
+
+  @override
+  String get tbNameHand => '手形工具';
 
   @override
   String get tbNameHighlight => '醒目提示';

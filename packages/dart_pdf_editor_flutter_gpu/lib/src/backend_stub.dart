@@ -1,21 +1,41 @@
 import 'package:dart_pdf_editor/dart_pdf_editor.dart';
 
 import 'backend_stats.dart';
+import 'text_outliner.dart';
 
 /// Web/unsupported compile-time stub for [FlutterGpuTileRasterBackend].
 class FlutterGpuTileRasterBackend extends PdfTileRasterBackend {
   FlutterGpuTileRasterBackend({
     this.msaa = true,
     this.allowOverprintApproximation = false,
+    this.overprintRetryMaxDimension = 512,
+    this.overprintRetryMaxCommands = 768,
     this.maxTextureBytes = 256 << 20,
     this.maxGeometryBytes = 256 << 20,
+    this.maxTransientAttachmentBytes = 64 << 20,
+    this.enableProactiveWarmUp,
+    this.analyticText = true,
+    this.textOutliner,
+    this.systemTextOutlines = false,
     FlutterGpuTileBackendStats? stats,
-  }) : stats = stats ?? FlutterGpuTileBackendStats();
+  })  : assert(overprintRetryMaxDimension == null ||
+            overprintRetryMaxDimension > 0),
+        assert(
+            overprintRetryMaxCommands == null || overprintRetryMaxCommands > 0),
+        assert(maxTransientAttachmentBytes >= 0),
+        stats = stats ?? FlutterGpuTileBackendStats();
 
   final bool msaa;
   final bool allowOverprintApproximation;
+  final int? overprintRetryMaxDimension;
+  final int? overprintRetryMaxCommands;
   final int maxTextureBytes;
   final int maxGeometryBytes;
+  final int maxTransientAttachmentBytes;
+  final bool? enableProactiveWarmUp;
+  final bool analyticText;
+  final FlutterGpuTextOutliner? textOutliner;
+  final bool systemTextOutlines;
   final FlutterGpuTileBackendStats stats;
   String? _lastSessionRejection;
 
@@ -26,6 +46,9 @@ class FlutterGpuTileRasterBackend extends PdfTileRasterBackend {
   bool get isPlatformSupported => false;
 
   void clearImageCache() {}
+
+  @override
+  Future<void> warmUp() async {}
 
   @override
   String get debugLabel => 'flutter_gpu-unavailable';

@@ -201,6 +201,8 @@ void main() {
       expect(editing.selectedAnnotationSlots, [(0, 0)]);
       expect(find.text('Bring to front'), findsOneWidget);
       expect(find.text('Send to back'), findsOneWidget);
+      expect(
+          find.byKey(const ValueKey('pdf-annot-menu-flatten')), findsOneWidget);
       expect(find.text('Delete'), findsOneWidget);
 
       await tester.tap(find.text('Bring to front'));
@@ -239,6 +241,22 @@ void main() {
       expect(editing.hasAnnotationSelection, isFalse);
     });
 
+    testWidgets('Flatten from the menu bakes only the right-clicked annotation',
+        (tester) async {
+      final editing = await pumpViewer(tester);
+
+      await rightClick(tester, viewPoint(110, 725));
+      await tester.tap(find.byKey(const ValueKey('pdf-annot-menu-flatten')));
+      await tester.pumpAndSettle();
+
+      final annotations = editing.document.page(0).annotations;
+      expect(annotations, hasLength(1));
+      expect(annotations.single.rect, const PdfRect(200, 700, 300, 750));
+      expect(editing.hasAnnotationSelection, isFalse);
+      editing.undo();
+      expect(editing.document.page(0).annotations, hasLength(2));
+    });
+
     testWidgets('Lock from the menu locks the annotation and clears selection',
         (tester) async {
       final editing = await pumpViewer(tester);
@@ -261,8 +279,7 @@ void main() {
       await rightClick(tester, viewPoint(110, 725));
       expect(editing.hasAnnotationSelection, isFalse);
       expect(find.byKey(const ValueKey('pdf-annot-menu-lock')), findsNothing);
-      expect(
-          find.byKey(const ValueKey('pdf-annot-menu-delete')), findsNothing);
+      expect(find.byKey(const ValueKey('pdf-annot-menu-delete')), findsNothing);
       expect(
           find.byKey(const ValueKey('pdf-annot-menu-unlock')), findsOneWidget);
 
@@ -523,7 +540,8 @@ void main() {
     testWidgets('a text field rules off edit, structure, and delete',
         (tester) async {
       await openMenu(tester, 'name');
-      expect(find.byKey(const ValueKey('pdf-form-menu-rename')), findsOneWidget);
+      expect(
+          find.byKey(const ValueKey('pdf-form-menu-rename')), findsOneWidget);
       expect(
           find.byKey(const ValueKey('pdf-form-menu-flatten')), findsOneWidget);
       // edit (value + style) | rename/convert | delete/flatten
@@ -598,6 +616,57 @@ void main() {
       final copy = tester.widget<PopupMenuItem>(
           find.byKey(const ValueKey('pdf-text-menu-copy')));
       expect(copy.enabled, isTrue);
+    });
+
+    testWidgets('the text menu is anchored in an offset navigator overlay',
+        (tester) async {
+      tester.view.physicalSize = const Size(1000, 1400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final controller = PdfViewerController();
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Row(children: [
+            const SizedBox(width: 220),
+            Expanded(
+              child: Navigator(
+                onGenerateRoute: (_) => MaterialPageRoute<void>(
+                  builder: (_) => Scaffold(
+                    body: PdfViewer(
+                      initialFit: PdfViewerFit.width,
+                      document: PdfDocument.open(buildMultiPagePdf(1)),
+                      controller: controller,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ));
+      await tester.pump();
+
+      const navigatorLeft = 220.0;
+      const nestedScale = (1000 - navigatorLeft) / 612;
+      final clickPosition = Offset(
+        navigatorLeft + 100 * nestedScale,
+        (792 - 720) * nestedScale,
+      );
+      await rightClick(tester, clickPosition);
+
+      final menuPosition = tester.getTopLeft(
+        find.byKey(const ValueKey('pdf-text-menu-copy')),
+      );
+      expect(
+        (menuPosition.dx - clickPosition.dx).abs(),
+        lessThan(100),
+        reason: 'The nested overlay origin must not be added twice.',
+      );
+
+      await tester.tapAt(const Offset(900, 1200));
+      await tester.pumpAndSettle();
     });
 
     testWidgets('Copy puts the selection on the system clipboard',

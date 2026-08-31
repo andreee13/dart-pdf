@@ -646,15 +646,76 @@ class PdfPagePreviewCache extends ChangeNotifier {
     required int width,
     required int height,
   }) {
-    final entry = _entries.take(index); // a successful lookup is an LRU use
-    if (entry == null ||
-        !identical(entry.page, page) ||
-        !entry.includesImages ||
-        entry.image.width < width ||
-        entry.image.height < height) {
-      return null;
+    return _completeImageFor(index, page, width: width, height: height);
+  }
+
+  /// Returns complete cached pixels suitable for a thumbnail.
+  ///
+  /// An exact-or-larger base/intermediate preview wins. When none exists,
+  /// [minimumScale] permits a slightly softer complete preview instead. Web
+  /// thumbnail surfaces use 0.75: a 200 px viewer preview is materially better
+  /// than replaying a dense 39k-command scene for a 256 px sidebar tile and
+  /// blocking the platform thread for hundreds of milliseconds. The image is
+  /// still page-identity checked and must include all images.
+  ui.Image? thumbnailImageFor(
+    int index,
+    PdfPage page, {
+    required int width,
+    required int height,
+    double minimumScale = 1,
+  }) {
+    final exact = _completeImageFor(
+      index,
+      page,
+      width: width,
+      height: height,
+    );
+    if (exact != null || minimumScale >= 1) return exact;
+    return _completeImageFor(
+      index,
+      page,
+      width: math.max(1, (width * minimumScale).ceil()),
+      height: math.max(1, (height * minimumScale).ceil()),
+    );
+  }
+
+  ui.Image? _completeImageFor(
+    int index,
+    PdfPage page, {
+    required int width,
+    required int height,
+  }) {
+    _IntermediatePreviewKey? bestIntermediate;
+    var bestIsBase = false;
+    int? bestPixels;
+
+    void consider(_PreviewEntry? entry, {_IntermediatePreviewKey? key}) {
+      if (entry == null ||
+          !identical(entry.page, page) ||
+          !entry.includesImages ||
+          entry.image.width < width ||
+          entry.image.height < height ||
+          (bestPixels != null && entry.pixels >= bestPixels!)) {
+        return;
+      }
+      bestPixels = entry.pixels;
+      bestIntermediate = key;
+      bestIsBase = key == null;
     }
-    return entry.image.clone();
+
+    consider(_entries.peek(index));
+    for (final key in _intermediateEntries.keys) {
+      if (key.pageIndex == index) {
+        consider(_intermediateEntries.peek(key), key: key);
+      }
+    }
+
+    final entry = bestIsBase
+        ? _entries.take(index)
+        : bestIntermediate == null
+            ? null
+            : _intermediateEntries.take(bestIntermediate!);
+    return entry?.image.clone();
   }
 
   /// Returns a lease on a complete retained scene for this page and display
@@ -1416,7 +1477,8 @@ class PdfPagePreviewCache extends ChangeNotifier {
             page, commands, plan,
             includeImages: decodeImages, maxImagePixelRatio: buildRatio);
       } else {
-        picture = await PdfPageRenderer.renderPictureRecordedWithPlan(page, plan,
+        picture = await PdfPageRenderer.renderPictureRecordedWithPlan(
+            page, plan,
             maxImagePixelRatio: buildRatio);
       }
       try {
@@ -1869,11 +1931,20 @@ class PdfPagePreviewCache extends ChangeNotifier {
   /// scroll paints blank (then re-renders) instead of flashing now-deleted
   /// content. The rest rebind in place as before.
   void rebind(List<PdfPage> pages, {bool Function(int index)? changed}) {
-    // A retained scene keeps the PdfPage it was recorded from as well as its
-    // command objects. Even an unchanged page in an incremental revision has
-    // a new document graph, so do not rebind these by index the way immutable
-    // raster pixels can be rebound.
-    _retainedScenes.clear();
+    // A retained scene keeps the exact PdfPage it was recorded from as well as
+    // its command objects. The incremental viewer reconciler preserves that
+    // identity for clean pages, so their scenes remain valid; a traditional
+    // full revision swap replaces every page object and naturally evicts all
+    // of them through this same identity check.
+    for (final key in _retainedScenes.keys.toList()) {
+      final index = key.pageIndex;
+      final entry = _retainedScenes.peek(key)!;
+      if (index >= pages.length ||
+          (changed?.call(index) ?? false) ||
+          !identical(entry.page, pages[index])) {
+        _retainedScenes.evict(key);
+      }
+    }
     bindPages(pages);
     var dropped = false;
     for (final index in _entries.keys.toList()) {
@@ -1910,6 +1981,60 @@ class PdfPagePreviewCache extends ChangeNotifier {
       }
     }
     if (dropped && !_disposed) notifyListeners();
+  }
+
+  /// Re-keys every in-memory raster/scene tier after a pure page reorder.
+  ///
+  /// [newIndexForOld] must be a complete permutation. Page objects and pixels
+  /// stay the same; only their page slots change. Asynchronous work admitted
+  /// under an old slot is rejected by [bindPages] after this returns.
+  void reorder(List<PdfPage> pages, List<int> newIndexForOld) {
+    if (newIndexForOld.length != pages.length ||
+        newIndexForOld.toSet().length != pages.length ||
+        newIndexForOld.any((index) => index < 0 || index >= pages.length)) {
+      throw ArgumentError.value(
+        newIndexForOld,
+        'newIndexForOld',
+        'must be a permutation matching pages',
+      );
+    }
+
+    int moved(int oldIndex) => newIndexForOld[oldIndex];
+
+    _retainedScenes.remapKeys(
+      (key) => _RetainedSceneKey(moved(key.pageIndex), key.plan),
+    );
+    _entries.remapKeys(moved);
+    _intermediateEntries.remapKeys(
+      (key) => _IntermediatePreviewKey(
+        moved(key.pageIndex),
+        key.longestSide,
+      ),
+    );
+    _fullEntries.remapKeys(
+      (key) => PdfPageRasterSignature(
+        pageIndex: moved(key.pageIndex),
+        width: key.width,
+        height: key.height,
+        pageColor: key.pageColor,
+        annotations: key.annotations,
+        rotation: key.rotation,
+      ),
+    );
+    bindPages(pages);
+    for (final index in _entries.keys) {
+      _entries.peek(index)!.page = pages[index];
+    }
+    for (final key in _intermediateEntries.keys) {
+      _intermediateEntries.peek(key)!.page = pages[key.pageIndex];
+    }
+    for (final key in _fullEntries.keys) {
+      _fullEntries.peek(key)!.page = pages[key.pageIndex];
+    }
+    for (final key in _retainedScenes.keys) {
+      _retainedScenes.peek(key)!.page = pages[key.pageIndex];
+    }
+    if (!_disposed) notifyListeners();
   }
 
   /// Drops every preview (different document, page color change...).
@@ -2030,7 +2155,7 @@ class _RetainedSceneEntry {
     required this.estimatedBytes,
   });
 
-  final PdfPage page;
+  PdfPage page;
   final PdfRetainedScene scene;
   final ui.Picture? picture;
   final bool fromWorker;

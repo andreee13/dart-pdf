@@ -31,6 +31,9 @@ final _githubUrl = Uri.parse('https://github.com/ben-milanko/dart-pdf');
 /// The published Flutter package the example is built on.
 final _pubDevUrl = Uri.parse('https://pub.dev/packages/dart_pdf_editor');
 
+/// CI stamps Patrol performance traces with the exact revision under test.
+const _buildCommit = String.fromEnvironment('PDF_BUILD_COMMIT');
+
 /// A CORS-enabled, Range-capable sample used to prefill the "Open from a URL"
 /// field - the classic pdf.js test document, served by raw.githubusercontent
 /// with `Access-Control-Allow-Origin: *`.
@@ -113,11 +116,19 @@ String pdfSavePathWithExtension(String path) {
 }
 
 void main() {
+  if (_buildCommit.isNotEmpty) {
+    PdfPerfLog.buildTag = 'commit=$_buildCommit';
+  }
   // Register the optional bundled editor fonts + web render worker so the
   // example keeps the full-featured editor (font menu catalogue, composite-text
   // fallbacks, off-main-thread web rendering). A viewer-only app would omit the
   // dart_pdf_editor_assets dependency and this call.
   registerBundledEditorAssets();
+  // Repository checkouts intentionally keep only a placeholder in the asset
+  // package; the example's web build compiles the real worker into web/.
+  // Point this app at that self-hosted bundle. Published package consumers can
+  // keep the package-asset URL installed by registerBundledEditorAssets().
+  if (kIsWeb) pdfRenderWorkerScriptUrl = 'pdf_render_worker.dart.js';
   // Diagnostics: turn on the in-app performance trace (interpret times,
   // render-hold/scheduler transitions, prerender warms, and frame JANK,
   // streamed to the browser console) without a rebuild by opening the demo
@@ -223,7 +234,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
   /// decline their session and transparently keep using the Canvas backend.
   /// Keeping one instance also makes its diagnostics meaningful app-wide.
   late final FlutterGpuTileRasterBackend _tileRasterBackend =
-      FlutterGpuTileRasterBackend();
+      FlutterGpuTileRasterBackend(systemTextOutlines: true);
 
   /// App-wide on-disk caches sharing one persistent backend (filesystem on
   /// native, IndexedDB on web - see persistent_cache.dart). The raster
@@ -680,6 +691,18 @@ class _ViewerScreenState extends State<ViewerScreen> {
             title: _horizontalLayout
                 ? appL10n(context).exVerticalLayout
                 : appL10n(context).exHorizontalLayout,
+          ),
+        ),
+        PopupMenuItem(
+          key: const ValueKey('dartpdf-gpu-route-devtool'),
+          value: () => pdfDebugShowGpuRasterRoutes.value =
+              !pdfDebugShowGpuRasterRoutes.value,
+          enabled: tab?.session != null,
+          child: _appMenuTile(
+            icon: Icons.developer_mode,
+            title: pdfDebugShowGpuRasterRoutes.value
+                ? 'Hide GPU rendering overlay'
+                : 'Show GPU rendering overlay',
           ),
         ),
         PopupMenuItem(

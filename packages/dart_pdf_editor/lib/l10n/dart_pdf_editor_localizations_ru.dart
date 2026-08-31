@@ -1384,6 +1384,9 @@ class DartPdfEditorLocalizationsRu extends DartPdfEditorLocalizations {
   String get tbAutosizeTextBox => 'Автоподбор размера текстового поля (Alt+Z)';
 
   @override
+  String get tbAutosizeTextFont => 'Подогнать шрифт под текстовое поле';
+
+  @override
   String get tbCalibrateScaleHint =>
       'Нарисуйте линию известной длины, чтобы откалибровать масштаб.';
 
@@ -1626,6 +1629,9 @@ class DartPdfEditorLocalizationsRu extends DartPdfEditorLocalizations {
 
   @override
   String get tbNameEraser => 'Стереть рукописные штрихи';
+
+  @override
+  String get tbNameHand => 'Рука';
 
   @override
   String get tbNameHighlight => 'Выделение';

@@ -1759,9 +1759,9 @@
   "@tbAlignVerticalCenters": {
     "description": "Tooltip: align selected annotations on their vertical centers."
   },
-  "tbAnnotationsFlattened": "Annotations flattened into the pages",
+  "tbAnnotationsFlattened": "Annotations and form fields flattened into the pages",
   "@tbAnnotationsFlattened": {
-    "description": "Snackbar confirming annotations were baked into the page content."
+    "description": "Snackbar confirming annotations and form fields were baked into the page content."
   },
   "tbApplyRedactionsMessage": "The marked content will be permanently removed from the document. This cannot be undone.",
   "@tbApplyRedactionsMessage": {
@@ -1778,6 +1778,10 @@
   "tbAutosizeTextBox": "Autosize text box (Alt+Z)",
   "@tbAutosizeTextBox": {
     "description": "Tooltip for auto-sizing a free-text box to its content, with keyboard shortcut."
+  },
+  "tbAutosizeTextFont": "Fit font to text box",
+  "@tbAutosizeTextFont": {
+    "description": "Tooltip for choosing the largest font size that fits the selected free-text box."
   },
   "tbCalibrateScaleHint": "Draw a line of known length to calibrate the scale.",
   "@tbCalibrateScaleHint": {
@@ -1930,9 +1934,9 @@
   "@tbFingerScrolls": {
     "description": "Tooltip when finger scrolls and only the pen draws; tapping switches finger to drawing."
   },
-  "tbFlattenAnnotationsTooltip": "Flatten annotations into the pages",
+  "tbFlattenAnnotationsTooltip": "Flatten annotations and form fields into the pages",
   "@tbFlattenAnnotationsTooltip": {
-    "description": "Tooltip for the button that bakes annotations into page content."
+    "description": "Tooltip for the button that bakes annotations and form fields into page content."
   },
   "tbFlattenForm": "Flatten form",
   "@tbFlattenForm": {
@@ -2016,35 +2020,35 @@
   },
   "tbMarkupHighlight": "Highlight",
   "@tbMarkupHighlight": {
-    "description": "Text-markup action name: highlight the text selection."
+    "description": "Text-markup tool name: highlight text."
   },
-  "tbMarkupHighlightTip": "Highlight selection",
+  "tbMarkupHighlightTip": "Highlight text",
   "@tbMarkupHighlightTip": {
-    "description": "Tooltip: highlight the current text selection."
+    "description": "Tooltip for the text highlight tool."
   },
   "tbMarkupSquiggly": "Squiggly-underline",
   "@tbMarkupSquiggly": {
-    "description": "Text-markup action name: squiggly-underline the text selection."
+    "description": "Text-markup tool name: squiggly-underline text."
   },
-  "tbMarkupSquigglyTip": "Squiggly-underline selection",
+  "tbMarkupSquigglyTip": "Squiggly-underline text",
   "@tbMarkupSquigglyTip": {
-    "description": "Tooltip: squiggly-underline the current text selection."
+    "description": "Tooltip for the squiggly-underline tool."
   },
   "tbMarkupStrikeOut": "Strike out",
   "@tbMarkupStrikeOut": {
-    "description": "Text-markup action name: strike out the text selection."
+    "description": "Text-markup tool name: strike out text."
   },
-  "tbMarkupStrikeOutTip": "Strike out selection",
+  "tbMarkupStrikeOutTip": "Strike out text",
   "@tbMarkupStrikeOutTip": {
-    "description": "Tooltip: strike out the current text selection."
+    "description": "Tooltip for the strike-out tool."
   },
   "tbMarkupUnderline": "Underline",
   "@tbMarkupUnderline": {
-    "description": "Text-markup action name: underline the text selection."
+    "description": "Text-markup tool name: underline text."
   },
-  "tbMarkupUnderlineTip": "Underline selection",
+  "tbMarkupUnderlineTip": "Underline text",
   "@tbMarkupUnderlineTip": {
-    "description": "Tooltip: underline the current text selection."
+    "description": "Tooltip for the underline tool."
   },
   "tbMoreColors": "More colors…",
   "@tbMoreColors": {
@@ -2081,6 +2085,10 @@
   "tbNameEraser": "Erase ink strokes",
   "@tbNameEraser": {
     "description": "Tool name: erases ink strokes."
+  },
+  "tbNameHand": "Hand",
+  "@tbNameHand": {
+    "description": "Name of the default page-navigation mode, which pans the document by dragging."
   },
   "tbNameHighlight": "Highlight",
   "@tbNameHighlight": {
@@ -2158,9 +2166,9 @@
   "@tbNewFieldType": {
     "description": "Tooltip for the menu selecting which type of form field a drag will create."
   },
-  "tbNoAnnotationsToFlatten": "No annotations to flatten",
+  "tbNoAnnotationsToFlatten": "No annotations or form fields to flatten",
   "@tbNoAnnotationsToFlatten": {
-    "description": "Snackbar shown when the flatten action runs but there are no annotations."
+    "description": "Snackbar shown when the flatten action runs but there are no annotations or form fields."
   },
   "tbNoCustomStamps": "No custom stamps",
   "@tbNoCustomStamps": {
@@ -2242,9 +2250,9 @@
   "@tbScale": {
     "description": "Leading label of the measurement-scale chip."
   },
-  "tbSelectTextForMarkup": "Select text to use markup",
+  "tbSelectTextForMarkup": "Choose a markup, then select text",
   "@tbSelectTextForMarkup": {
-    "description": "Hint shown when the markup tools are open but no text is selected."
+    "description": "Hint explaining the arm-first text-markup workflow."
   },
   "tbSelectionCount": "{count, plural, =1{Selection} other{{count} selected}}",
   "@tbSelectionCount": {

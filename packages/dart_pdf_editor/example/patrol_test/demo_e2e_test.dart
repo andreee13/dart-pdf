@@ -1,4 +1,5 @@
 import 'package:dart_pdf_editor/dart_pdf_editor.dart';
+import 'package:dart_pdf_editor_assets/dart_pdf_editor_assets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:patrol/patrol.dart';
@@ -7,6 +8,7 @@ import 'package:pdf_viewer_example/main.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _preferencePrefix = 'dart_pdf_editor.editing.';
+const _buildCommit = String.fromEnvironment('PDF_BUILD_COMMIT');
 const _testPreferences = <String, Object>{
   '${_preferencePrefix}locale': 'en',
   '${_preferencePrefix}showAnnotations': true,
@@ -23,6 +25,21 @@ const _testPreferences = <String, Object>{
 };
 
 void main() {
+  // Patrol owns this test entry point, so the example app's main() does not
+  // run. Mirror its optional-asset registration so the browser journey
+  // exercises the production render worker instead of silently falling back
+  // to main-thread interpretation.
+  registerBundledEditorAssets();
+  // CI builds the example's self-hosted worker before Patrol. Native backends
+  // ignore this web-only URL and continue to use isolates.
+  pdfRenderWorkerScriptUrl = 'pdf_render_worker.dart.js';
+
+  // Stamp the shared perf logger here as well as in lib/main.dart so CI
+  // artifacts can always be attributed to the exact revision under test.
+  if (_buildCommit.isNotEmpty) {
+    PdfPerfLog.buildTag = 'commit=$_buildCommit';
+  }
+
   patrolTest('launches the demo and exercises PDF actions and overlays',
       ($) async {
     final demo = await _DemoHarness.open($);
@@ -265,14 +282,26 @@ void main() {
       await $.tester.enterText(editor, 'Grace Hopper');
       await $.tester.testTextInput.receiveAction(TextInputAction.done);
       await $.pump(const Duration(milliseconds: 400));
+      await demo.waitFor(
+        () => field('name').value == 'Grace Hopper',
+        reason: 'the text-field revision should finish before validation',
+      );
       expect(field('name').value, 'Grace Hopper');
 
       expect(field('newsletter').isChecked, isTrue);
-      await demo.tapFormField('newsletter');
+      await demo.tapFormFieldUntil(
+        'newsletter',
+        () => !field('newsletter').isChecked,
+        reason: 'the checkbox revision should finish before validation',
+      );
       expect(field('newsletter').isChecked, isFalse);
 
       expect(field('color').value, 'Blue');
-      await demo.tapFormField('color');
+      await demo.tapFormFieldUntil(
+        'color',
+        () => field('color').value == 'Red',
+        reason: 'the radio revision should finish before validation',
+      );
       expect(field('color').value, 'Red');
 
       expect(field('favorite').value, 'Green');
@@ -281,6 +310,10 @@ void main() {
       expect($('Blue'), findsOneWidget);
       await $.tester.tap(find.text('Blue'));
       await $.pump(const Duration(milliseconds: 400));
+      await demo.waitFor(
+        () => field('favorite').value == 'Blue',
+        reason: 'the choice revision should finish before validation',
+      );
       expect(field('favorite').value, 'Blue');
     } finally {
       await demo.close();
@@ -370,14 +403,70 @@ class _DemoHarness {
   }
 
   Future<void> tapFormField(String name, {int widgetIndex = 0}) async {
+    final field = editing.acroForm?.fieldNamed(name);
+    final rect = field?.widgetRect(widgetIndex);
+    final page = field?.widgetPageIndex(widgetIndex) ?? -1;
+    expect(field, isNotNull, reason: '$name should be an AcroForm field');
+    expect(rect, isNotNull, reason: '$name widget $widgetIndex needs a rect');
+    expect(page, greaterThanOrEqualTo(0),
+        reason: '$name widget $widgetIndex should be on a page');
+
+    // The compact editing dock floats over the bottom of the page. Lower
+    // fields (notably the radio buttons on the showcase page) can otherwise
+    // be present in the tree while their tap target is covered by the dock on
+    // a short Android viewport. Frame the widget before tapping it, just as a
+    // user would scroll the field into view.
     final target = find.byKey(
       ValueKey(
-        'pdf-form-field-${viewer.currentPage}-$name-$widgetIndex',
+        'pdf-form-field-$page-$name-$widgetIndex',
       ),
     );
-    await waitForFinder(target);
-    await tester.tap(target);
+    final hitTarget = target.hitTestable();
+    // On a loaded-down Android emulator the viewer's zoom animation can
+    // advance more slowly than its scroll animation. Do not tap a stale
+    // target that is still under the floating editing dock: that activates
+    // the dock and leaves its modal sheet covering the retry. Re-frame until
+    // Flutter confirms that the live form widget owns its centre point.
+    for (var attempt = 0;
+        attempt < 3 && hitTarget.evaluate().isEmpty;
+        attempt++) {
+      await viewer.showRect(page, rect!);
+      await $.pump(const Duration(milliseconds: 350));
+      await waitForFinder(target);
+      for (var i = 0; i < 10 && hitTarget.evaluate().isEmpty; i++) {
+        await $.pump(const Duration(milliseconds: 100));
+      }
+    }
+    expect(
+      hitTarget,
+      findsOneWidget,
+      reason: '$name widget $widgetIndex should be visible and unobscured',
+    );
+    await tester.tap(hitTarget);
     await $.pump(const Duration(milliseconds: 400));
+  }
+
+  /// Taps a button-like form widget, retrying one physical tap when a slow
+  /// Android emulator loses the first gesture during a page/raster handoff.
+  ///
+  /// This does not fall back to the controller API: both attempts still go
+  /// through the live overlay, so the journey continues to validate the real
+  /// reader interaction path. Text and choice fields use [tapFormField]
+  /// directly because a successful first tap opens stateful chrome.
+  Future<void> tapFormFieldUntil(
+    String name,
+    bool Function() changed, {
+    required String reason,
+    int widgetIndex = 0,
+  }) async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await tapFormField(name, widgetIndex: widgetIndex);
+      for (var i = 0; i < 20 && !changed(); i++) {
+        await $.pump(const Duration(milliseconds: 100));
+      }
+      if (changed()) return;
+    }
+    expect(changed(), isTrue, reason: reason);
   }
 
   Future<void> goToPage(int pageNumber) async {
@@ -404,6 +493,11 @@ class _DemoHarness {
     required String group,
     required PdfEditTool tool,
   }) async {
+    // Some one-shot tools return to Select after they commit. Opening the
+    // Select group in that state toggles Select off, so preserve the already
+    // satisfied state instead of driving the toolbar again.
+    if (editing.tool == tool) return;
+
     final toolButton = find.byKey(ValueKey('pdf-tool-${tool.name}'));
     final mobileHandle = find.byKey(const ValueKey('pdf-tools-handle'));
     if (mobileHandle.evaluate().isNotEmpty) {
@@ -411,10 +505,20 @@ class _DemoHarness {
       await $.pump(const Duration(milliseconds: 250));
       final groupTab = find.byKey(ValueKey('pdf-group-tab-$group'));
       await tester.ensureVisible(groupTab);
-      await tester.tap(groupTab);
+      final visibleGroupTab = groupTab.hitTestable();
+      await waitForFinder(visibleGroupTab, attempts: 30);
+      await tester.tap(visibleGroupTab);
       await $.pump(const Duration(milliseconds: 250));
+      // Select is the mobile sheet's only single-option group, so tapping its
+      // group tab now arms it directly and closes the sheet. Multi-tool groups
+      // still expose their tiles below.
+      if (editing.tool == tool) return;
+      expect(toolButton, findsOneWidget,
+          reason: '$tool should be available in the $group tool group');
       await tester.ensureVisible(toolButton);
-      await tester.tap(toolButton);
+      final visibleToolButton = toolButton.hitTestable();
+      await waitForFinder(visibleToolButton, attempts: 30);
+      await tester.tap(visibleToolButton);
       await $.pump();
       // Mobile keeps the tools sheet open to expose the active settings.
       // Tap its modal barrier so the armed tool can reach the page.

@@ -1364,6 +1364,9 @@ class DartPdfEditorLocalizationsNl extends DartPdfEditorLocalizations {
   String get tbAutosizeTextBox => 'Tekstvak automatisch aanpassen (Alt+Z)';
 
   @override
+  String get tbAutosizeTextFont => 'Lettertype passend maken in tekstvak';
+
+  @override
   String get tbCalibrateScaleHint =>
       'Teken een lijn met bekende lengte om de schaal te kalibreren.';
 
@@ -1604,6 +1607,9 @@ class DartPdfEditorLocalizationsNl extends DartPdfEditorLocalizations {
 
   @override
   String get tbNameEraser => 'Inktstreken wissen';
+
+  @override
+  String get tbNameHand => 'Hand';
 
   @override
   String get tbNameHighlight => 'Markeren';

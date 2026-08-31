@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.0.0
+
+- Allow `flattenAnnotations` to target a supplied annotation selection and
+  expose embedded-font descent metrics for accurate free-text box fitting.
+- Flatten empty text, choice, and button widgets without dropping their
+  annotation appearance or blocking the rest of a form.
+- Lockstep major release for the dart-pdf 4.0.0 package suite. The
+  `pdf_document` public API changes in this release are additive.
+
+## 3.8.0
+
+- Add the lazily materialized `PdfDocument.pages` view and keep document caches
+  coherent through `CosDocument.revision`.
+- Add `PdfEditImpact.pageOrderOnly` and reconcile page-order-only incremental
+  edits without rebuilding unchanged page objects.
+- Reduce repeated page-tree and annotation work during large-document startup,
+  structural edits, undo, and redo.
+
 ## 3.7.0
 
 - Add `SimpleFont`, the simple-font counterpart to `Type0Font`: one place that
