@@ -6578,6 +6578,10 @@ class _PdfViewerState extends State<PdfViewer>
         editing.cancelImageCrop();
         return;
       }
+      if (editing.activeSavedAnnotation != null) {
+        editing.cancelSavedAnnotationPlacement();
+        return;
+      }
       if (editing.hasAnnotationSelection) {
         editing.clearAnnotationSelection();
         return;
@@ -9377,7 +9381,9 @@ class _PdfViewerPageState extends State<_PdfViewerPage> {
                   // mounted for an armed tool, the eyedropper, a
                   // default-mode (mouse click) annotation selection, or
                   // a pending attention flash (the sidebar's zoom-to -
-                  // links and form fields flash without a selection)
+                  // links and form fields flash without a selection). Cursor
+                  // guides mount the same low-latency hover layer even in
+                  // ordinary reader/hand mode.
                   builder: (context, _) {
                     final rasterCurrent = _rastered &&
                         _annotationLayerCurrent &&
@@ -9390,8 +9396,12 @@ class _PdfViewerPageState extends State<_PdfViewerPage> {
                             widget.page.document.cos, editing.document.cos);
                     return editing.tool == null &&
                             !editing.isPickingColor &&
+                            editing.activeSavedAnnotation == null &&
                             !editing.hasAnnotationSelection &&
                             editing.pendingFlash == null &&
+                            !editing.preferences.showVerticalCursorGuide &&
+                            !editing.preferences.showHorizontalCursorGuide &&
+                            !editing.preferences.showSnapGrid &&
                             (rasterCurrent ||
                                 editing.committedInkOn(widget.index) == null)
                         ? const SizedBox.shrink()

@@ -2,6 +2,24 @@
 
 ## 4.0.0
 
+- Add a persistent named handwritten-signature library with previews,
+  selection, rename/redraw/delete management, and automatic migration from the
+  previous single saved signature.
+- Add a dockable, searchable reusable-annotation library backed by detached
+  `PdfAnnotationSnapshot`s, with named groups, context-menu capture,
+  cross-document placement, cursor-following drop previews, repeat Paste, and
+  a direct path to the custom-stamp collection.
+- Add independently configurable horizontal and vertical cursor guide lines,
+  an optional visible page-space grid, and persisted grid snapping for
+  annotation placement, movement, resizing, and vertices (hold Alt to bypass
+  snapping temporarily). These controls live in the editor Settings popup.
+- Enable the example's visible digital-signature tool with a secure, persisted
+  signing identity on macOS and web, and hide that tool from the stock
+  `PdfEditorView` when a host has not supplied a signing handler.
+- Let users select a signed box and remove its digital signature from the
+  contextual toolbar on desktop or mobile, with confirmation and undo.
+- Refresh signed pages immediately after placement so the visible signature
+  box appears as soon as signing completes.
 - Add an optional asynchronous tile-backend retry hook and exact retained-scene
   re-recording, while preserving the existing Canvas fallback when a retry is
   unavailable, fails, or remains inexact.
