@@ -2103,6 +2103,13 @@ class _PdfViewerState extends State<PdfViewer>
   // warm only near the viewport (derived on hit-test/selection/search), so a
   // cap well above the working set never evicts an on-screen page.
   final PdfPageObjectCache<PdfPageText> _textCache = PdfPageObjectCache();
+  final Map<(PdfDocument, PdfPage), Future<PdfPageText?>> _workerTextRequests =
+      {};
+  // A failed warm should not retry on every frame, or retain an old document.
+  WeakReference<PdfPage>? _textWarmAttempt;
+  bool _textWarmRunning = false;
+  Timer? _textWarmTimer;
+  static const _textWarmIdleDelay = Duration(milliseconds: 500);
   final PdfPageObjectCache<List<PdfAnnotation>> _annotCache =
       PdfPageObjectCache();
   final PdfPageObjectCache<List<PdfAnnotation>> _visibleAnnotCache =
@@ -2185,6 +2192,7 @@ class _PdfViewerState extends State<PdfViewer>
       _setSlowScrollRasterWarmDirection(0);
     }
     _renderScheduler.parked = !widget.active;
+    _scheduleVisibleTextWarm();
   }
 
   /// Releases settled render work only after this frame has rebuilt the page
@@ -2207,6 +2215,7 @@ class _PdfViewerState extends State<PdfViewer>
 
   void _beginMotionRenderHold() {
     _cancelPreviewPrerenderSchedule();
+    _cancelVisibleTextWarm();
     _motionHoldReleaseTimer?.cancel();
     _motionHoldReleaseTimer = null;
     _renderScheduler.slowMotion = false;
@@ -2569,6 +2578,7 @@ class _PdfViewerState extends State<PdfViewer>
   /// that notification as the wake-up edge instead.
   void _onRenderSchedulerActivity() {
     _scheduleRasterWarm();
+    _scheduleVisibleTextWarm();
     if (_renderScheduler.busy) {
       _tileBackendWarmUpTimer?.cancel();
       _tileBackendWarmUpTimer = null;
@@ -2945,6 +2955,7 @@ class _PdfViewerState extends State<PdfViewer>
   /// window; releasing then started a 200-500 ms CAD raster in the middle of
   /// an otherwise continuous wheel stream.
   void _onScrollForDetail() {
+    _cancelVisibleTextWarm();
     _trackScrollVelocity();
     // the scheduler drains held pages nearest the viewport first
     _renderScheduler.focus = _jumpFocusPage ?? _controller.currentPage;
@@ -4175,6 +4186,7 @@ class _PdfViewerState extends State<PdfViewer>
       _slowScrollRasterWarmGeneration++;
       _scheduleTileBackendWarmUp();
     }
+    _scheduleVisibleTextWarm();
   }
 
   /// The revision controller notified. It owns the document revisions, so a
@@ -4193,6 +4205,7 @@ class _PdfViewerState extends State<PdfViewer>
     } else {
       setState(() {});
     }
+    _scheduleVisibleTextWarm();
   }
 
   /// Reconciles cached state to a document swap - from [_loadedDocument] to
@@ -4205,6 +4218,7 @@ class _PdfViewerState extends State<PdfViewer>
   /// document/controller) and from [_onRevisionControllerChanged] (a new
   /// revision with no host rebuild).
   void _swapDocument({bool preserveRevisionViewport = false}) {
+    _cancelVisibleTextWarm();
     final reconcileClock = Stopwatch()..start();
     final document = _document;
     if (preserveRevisionViewport &&
@@ -4782,6 +4796,7 @@ class _PdfViewerState extends State<PdfViewer>
     final changed =
         ready ? _rasteredPages.add(index) : _rasteredPages.remove(index);
     if (!changed) return;
+    if (ready) _scheduleVisibleTextWarm();
     _controller._pageRenderActivity.notify();
     final completedJump = ready && index == _jumpFocusPage;
     if (PdfPerfLog.enabled && ready) {
@@ -5002,6 +5017,7 @@ class _PdfViewerState extends State<PdfViewer>
   void dispose() {
     _commandWarmGeneration++;
     _slowScrollRasterWarmGeneration++;
+    _cancelVisibleTextWarm();
     // A namespace is private to this State and cannot be reused after dispose.
     // Retire it explicitly so the process-wide store neither lands an old
     // asynchronous raster nor retains an unreachable viewer token.
@@ -5368,6 +5384,7 @@ class _PdfViewerState extends State<PdfViewer>
       // nothing after it can be visible either.
       if (found && offset - widget.pageSpacing >= viewEnd) break;
     }
+    final pageChanged = current != _controller.currentPage;
     _controller._setCurrentPage(current);
     // A viewport that fell entirely inside the gap between two pages overlaps
     // none of them; the page the centre is on is still what the user is at.
@@ -5377,6 +5394,7 @@ class _PdfViewerState extends State<PdfViewer>
       qualityFirst < 0 ? current : qualityFirst,
       qualityLast < 0 ? current : qualityLast,
     );
+    if (pageChanged) _scheduleVisibleTextWarm();
   }
 
   /// The span of pages overlapping the viewport - see [_PdfOnScreenSpan].
@@ -5688,15 +5706,128 @@ class _PdfViewerState extends State<PdfViewer>
   Future<PdfPageText> _extractText(int index) async {
     final cached = _textCache[index];
     if (cached != null) return cached;
+    final document = _document;
+    final page = _pages[index];
     final textCache = widget.textCache;
     final key = widget.documentId;
+    final PdfPageText text;
     if (textCache != null && key != null && widget.editing == null) {
-      final text =
-          await textCache.get(key, index, () => _extractPageText(index));
-      return _textCache.putIfAbsent(index, () => text);
+      text = await textCache.get(
+          key, index, () => _extractPageText(index, document, page));
+    } else {
+      text = await _extractPageText(index, document, page);
     }
-    final text = await _extractPageText(index);
-    return _textCache.putIfAbsent(index, () => text);
+    return _textPageIsCurrent(index, document, page)
+        ? _textCache.putIfAbsent(index, () => text)
+        : text;
+  }
+
+  bool _textPageIsCurrent(int index, PdfDocument document, PdfPage page) =>
+      mounted &&
+      identical(_document, document) &&
+      index < _pages.length &&
+      identical(_pages[index], page);
+
+  /// Search and the speculative warm share one worker request for a page.
+  /// Keys carry revision identity: an old worker reply must never populate
+  /// the same page index after a document edit or replacement.
+  Future<PdfPageText?> _workerPageText(
+      int index, PdfDocument document, PdfPage page, PdfRenderWorker worker,
+      {int priority = 0}) {
+    final key = (document, page);
+    final existing = _workerTextRequests[key];
+    if (existing != null) {
+      worker.promoteTextExtraction(index, priority: priority);
+      return existing;
+    }
+    final request = Future<PdfPageText?>.sync(
+      () => worker.extractText(index, priority: priority),
+    ).onError((error, stackTrace) => null);
+    _workerTextRequests[key] = request;
+    unawaited(request.whenComplete(() {
+      if (identical(_workerTextRequests[key], request)) {
+        _workerTextRequests.remove(key);
+      }
+    }));
+    return request;
+  }
+
+  bool get _visibleTextWarmIdle =>
+      mounted &&
+      widget.active &&
+      !_renderScheduler.busy &&
+      !_motionRenderHoldActive &&
+      !(_settleTimer?.isActive ?? false);
+
+  void _cancelVisibleTextWarm() {
+    _textWarmTimer?.cancel();
+    _textWarmTimer = null;
+  }
+
+  /// Warm only the focused, already-painted heavy page, one at a time. A
+  /// mouse grab-pan tests for text before choosing its gesture; leaving text
+  /// cold until that press causes another full synchronous content walk.
+  /// The worker's text walk cannot yield to an urgent render, so wait for a
+  /// quiet viewport and idle render scheduler before preparing that hit test.
+  void _scheduleVisibleTextWarm() {
+    _cancelVisibleTextWarm();
+    if (_textWarmRunning ||
+        !_visibleTextWarmIdle ||
+        _pages.isEmpty ||
+        !(_effectiveRenderWorker?.isActive ?? false)) {
+      return;
+    }
+    final index = _controller.currentPage;
+    final page = _pages[index];
+    if (!_rasteredPages.contains(index) ||
+        _textCache[index] != null ||
+        identical(_textWarmAttempt?.target, page) ||
+        page.rawContentLength <= PdfViewer.hoverTextExtractMaxRawContentBytes) {
+      return;
+    }
+    _textWarmTimer = Timer(_textWarmIdleDelay, () {
+      _textWarmTimer = null;
+      if (_visibleTextWarmIdle) unawaited(_warmVisiblePageText());
+    });
+  }
+
+  Future<void> _warmVisiblePageText() async {
+    if (_textWarmRunning || !_visibleTextWarmIdle || _pages.isEmpty) {
+      return;
+    }
+    final index = _controller.currentPage;
+    if (!_rasteredPages.contains(index) || !_onScreenSpan.contains(index)) {
+      return;
+    }
+    final document = _document;
+    final page = _pages[index];
+    final worker = _effectiveRenderWorker;
+    if (_textCache[index] != null ||
+        identical(_textWarmAttempt?.target, page) ||
+        page.rawContentLength <= PdfViewer.hoverTextExtractMaxRawContentBytes ||
+        worker == null ||
+        !worker.isActive) {
+      return;
+    }
+    _textWarmAttempt = WeakReference(page);
+    _textWarmRunning = true;
+    try {
+      final text =
+          await _workerPageText(index, document, page, worker, priority: 3);
+      if (text != null && _textPageIsCurrent(index, document, page)) {
+        _textCache.putIfAbsent(index, () => text);
+      }
+      // A declining/failed worker leaves the cache cold. Speculation must
+      // never fall back to a synchronous extraction on the UI isolate.
+    } finally {
+      _textWarmRunning = false;
+      if (!_textPageIsCurrent(index, document, page)) {
+        _textWarmAttempt = null;
+      }
+      // Navigation or a revision may have changed the focused page while
+      // this request was pending. Only that latest page gets the next turn.
+      if (mounted) _scheduleVisibleTextWarm();
+    }
   }
 
   /// Extracts page [index]'s text off the UI isolate through the render worker
@@ -5705,13 +5836,16 @@ class _PdfViewerState extends State<PdfViewer>
   /// runs on the UI thread; the worker - kept in step with the current revision
   /// like the render path - moves it off. Search drives this; hover keeps its
   /// synchronous [_pageText] path, already gated by content size.
-  Future<PdfPageText> _extractPageText(int index) async {
+  Future<PdfPageText> _extractPageText(
+      int index, PdfDocument document, PdfPage page) async {
     final worker = _effectiveRenderWorker;
-    if (worker != null && worker.isActive) {
-      final text = await worker.extractText(index);
+    if (worker != null &&
+        worker.isActive &&
+        _textPageIsCurrent(index, document, page)) {
+      final text = await _workerPageText(index, document, page, worker);
       if (text != null) return text;
     }
-    return PdfTextExtractor.extract(_document, index);
+    return PdfTextExtractor.extract(document, index);
   }
 
   Future<List<PdfSearchResult>> _searchAllPages(
@@ -6169,8 +6303,8 @@ class _PdfViewerState extends State<PdfViewer>
   /// appears immediately, as it always has. For a HEAVY page (see
   /// [hoverTextExtractMaxRawContentBytes]) it never triggers the multi-hundred-
   /// ms extraction from a mere mouse-move: it uses the text only if already
-  /// resident (warmed by a real selection/search), else returns false and the
-  /// cursor stays grab. Touch (iPad) never hovers, so a finger pan never
+  /// resident (warmed by the worker or a selection/search), else returns false
+  /// and the cursor stays grab. Touch (iPad) never hovers, so a finger pan never
   /// reaches this at all.
   bool _hoverTextCursorAt(Offset local, {(int, double, double)? at}) {
     final point = at ?? _pagePointAt(local);
