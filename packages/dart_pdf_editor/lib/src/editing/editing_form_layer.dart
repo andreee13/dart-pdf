@@ -281,7 +281,7 @@ class _FormInteractionLayerState extends State<FormInteractionLayer> {
 
   Future<void> _onFieldTap(
       PdfFormField field, int widgetIndex, Rect viewRect) async {
-    if (field.type == PdfFieldType.signature) {
+    /* if (field.type == PdfFieldType.signature) {
       if (_isSigned(field)) {
         final pageRect = widget.geometry.toPageRect(viewRect);
         _controller.selectFormWidgetAt(
@@ -291,7 +291,7 @@ class _FormInteractionLayerState extends State<FormInteractionLayer> {
         );
       }
       return;
-    }
+    } */
     if (field.isReadOnly) return;
     switch (field.type) {
       case PdfFieldType.text:
@@ -364,7 +364,7 @@ class _FormInteractionLayerState extends State<FormInteractionLayer> {
   }
 
   bool _interactive(PdfFormField field) {
-    if (field.type == PdfFieldType.signature) return _isSigned(field);
+    /* if (field.type == PdfFieldType.signature) return _isSigned(field); */
     if (field.isReadOnly) return false;
     return switch (field.type) {
       PdfFieldType.text ||
