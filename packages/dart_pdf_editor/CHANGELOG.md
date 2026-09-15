@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+- Group the view-options menu around what its rows actually do. Reflow text
+  and the page grid each REPLACE the page viewer, but they were drawn as two
+  independent checkmarks among the display overlays, and each silently cleared
+  the other - so leaving a mode meant unticking the one you ticked, and plain
+  pages existed only as the absence of both. They are now one `SegmentedButton`
+  at the top of the menu, with `Pages` as a real destination, over a
+  `PdfEditingPreferences.viewMode` (`PdfViewMode`) that owns the exclusivity
+  the callers kept re-implementing - including the command palette, which
+  toggled the two bools independently and could show both at once. On compact
+  layouts the modes move up into the Controls sheet's View section, one tap
+  from the document: Reflow already had a tile there, and the page grid needed
+  Controls -> Settings -> scroll -> tick. The Settings sheet keeps only
+  settings, and `showPdfShellViewOptionsSheet` no longer takes `reflow` /
+  `pageGrid`.
+
+- Draw unembedded standard-14 text in the metric-compatible TeX Gyre faces
+  bundled by `dart_pdf_editor_assets` - Heros for Helvetica/Arial, Termes for
+  Times, Cursor for Courier - ahead of any host font. Substituting a face with
+  different advances opened white space inside words, because each character is
+  placed at the PDF's own pen offset: DejaVu Sans, the previous fallback, drew
+  `J` at 295/1000 em where Helvetica's table reserves 500, leaving ~2.7pt of air
+  after every capital J at 12pt. Without the assets package the renderer now
+  names the host's metric equivalents (Arial, Liberation Sans, Nimbus Sans and
+  their serif/mono counterparts) before falling back further.
+- Load only the substitute weights and slants a page actually shows in the
+  canvas2d web worker, and none for an invisible OCR layer.
+- Export the substitution policy (`PdfBundledSubstitute`,
+  `pdfBundledSubstituteFor`) so a host can resolve the same faces the renderer
+  does.
+
+## 4.4.0
+
+- Reach at least 10000% actual size independently of viewport width, with
+  3000%, 5000% and 10000% shell presets. Explicit host zoom caps keep their
+  previous behaviour.
+- Treat balanced compositing groups as indivisible indexed ranges, so a page
+  carrying transparency groups or soft masks no longer falls back to replaying
+  every command for a small zoomed viewport. Dense pages start using the
+  spatial grid at 32,768 commands, warmed through the render worker.
+- Cache native path geometry in the retained scene across zoom and detail
+  replays, under a 32 MiB geometry budget and a 65,536-entry cap that
+  participate in memory-pressure eviction.
+- Reuse the render worker's recorded text for selection and search, retaining
+  at most 32 pages and an estimated 16 MiB per worker. Warm a focused page's
+  text after 500 ms of viewport idle; motion cancels the pending warm.
+- Reserve one-tile-per-paint admission for pages above 250,000 commands, so an
+  ordinary indexed page can still fill the eight-tile batch.
+
 ## 4.3.0
 
 - Add `PdfKeyboardAvailability` so hosts can hide shortcut hints and shortcut

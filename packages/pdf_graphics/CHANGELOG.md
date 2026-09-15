@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Give unembedded Times-Bold, Times-Italic and Times-BoldItalic their own AFM
+  advances instead of reusing Times-Roman's (`A` is 611 against the roman's
+  722), so their text measures and selects where it is drawn. Helvetica's
+  oblique advances are its upright ones and keep sharing a table.
+
+## 4.4.0
+
+- Add `RecordedText`, a text-only snapshot a device can retain while it records
+  a page, so selection and search reuse that walk instead of interpreting the
+  content stream a second time. Extraction applies the existing separator, bidi
+  and geometry logic to the snapshot.
+- Stop stretching substituted glyphs across their character spacing, so a
+  fallback glyph keeps its own advance.
+
 ## 4.3.0
 
 - Align dependency constraints with the dart-pdf 4.3.0 package suite.
