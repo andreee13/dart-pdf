@@ -603,6 +603,15 @@ class AppLocalizationsJa extends AppLocalizations {
   String get editorSnapshotCopyFailed => 'スナップショットをクリップボードにコピーできませんでした';
 
   @override
+  String get editorSearchTabs => 'タブを検索';
+
+  @override
+  String get editorClearTabSearch => '検索をクリア';
+
+  @override
+  String get editorNoMatchingTabs => '一致するタブはありません';
+
+  @override
   String get editorTabs => 'タブ';
 
   @override
@@ -905,6 +914,18 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get undo => '元に戻す';
+
+  @override
+  String get welcomeCopyName => '名前をコピー';
+
+  @override
+  String get welcomeCopyPath => 'パスをコピー';
+
+  @override
+  String get welcomeOpen => '開く';
+
+  @override
+  String get welcomeOpenInNewWindow => '新しいウィンドウで開く';
 
   @override
   String get welcomeOpenPdf => 'PDF を開く';

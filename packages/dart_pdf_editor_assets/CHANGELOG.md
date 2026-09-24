@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Bundle Carlito, the metric-compatible Calibri clone, in regular, bold,
+  italic and bold-italic. Office and its print drivers emit Calibri
+  unembedded constantly; until now those pages were drawn in TeX Gyre Heros,
+  whose Helvetica advances are far too wide for Calibri's pen offsets (`C`
+  722 against 529), so every glyph crowded the next. Adds 2.6 MB of files,
+  0.86 MB over the wire: the OFL reserves the name, so the faces ship
+  unmodified rather than subset.
+- Check the four Carlito faces against Calibri's own advances in
+  `test/substitute_metrics_test.dart`, alongside the AFM checks.
+
+## 4.5.0
+
 - Bundle the metric-compatible TeX Gyre faces the renderer substitutes into
   unembedded standard-14 text: Heros (Helvetica/Arial), Termes (Times) and
   Cursor (Courier), in regular, bold, italic and bold-italic, joining the

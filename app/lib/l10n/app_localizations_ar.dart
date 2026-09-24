@@ -629,6 +629,15 @@ class AppLocalizationsAr extends AppLocalizations {
   String get editorSnapshotCopyFailed => 'تعذّر نسخ اللقطة إلى الحافظة';
 
   @override
+  String get editorSearchTabs => 'البحث في علامات التبويب';
+
+  @override
+  String get editorClearTabSearch => 'مسح البحث';
+
+  @override
+  String get editorNoMatchingTabs => 'لا توجد علامات تبويب مطابقة';
+
+  @override
   String get editorTabs => 'علامات التبويب';
 
   @override
@@ -946,6 +955,18 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get undo => 'تراجع';
+
+  @override
+  String get welcomeCopyName => 'نسخ الاسم';
+
+  @override
+  String get welcomeCopyPath => 'نسخ المسار';
+
+  @override
+  String get welcomeOpen => 'فتح';
+
+  @override
+  String get welcomeOpenInNewWindow => 'فتح في نافذة جديدة';
 
   @override
   String get welcomeOpenPdf => 'فتح ملف PDF';

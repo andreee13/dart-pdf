@@ -4,6 +4,9 @@
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
+#ifdef GDK_WINDOWING_WAYLAND
+#include <gdk/gdkwayland.h>
+#endif
 
 #include <cairo.h>
 
@@ -415,6 +418,16 @@ static void my_application_activate(GApplication* application) {
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
       project, self->dart_entrypoint_arguments);
+  // Render with Skia, not Impeller (#912). The Linux embedder turns Impeller
+  // on by default and runs it on OpenGL, where Impeller only gets 4x MSAA from
+  // an OpenGL ES 3 context or GL_EXT_multisampled_render_to_texture2. Common
+  // desktop GL drivers give it neither, and Impeller has no other antialiasing
+  // for arbitrary paths. PDF text is drawn as glyph outline paths, so every
+  // page came out aliased: 1-bit edges, and thin serifs and hairlines dropped
+  // out. Skia antialiases paths without MSAA. DARTPDF_IMPELLER=1 turns
+  // Impeller back on for comparison.
+  fl_dart_project_set_enable_impeller(
+      project, g_strcmp0(g_getenv("DARTPDF_IMPELLER"), "1") == 0);
 
   if (experimental_windowing_enabled()) {
     // fl_engine_new_headless starts the engine without installing an implicit
@@ -536,6 +549,29 @@ static void my_application_open(GApplication* application, GFile** files,
   }
 }
 
+// Implements GApplication::before_emit. Runs in the primary instance before
+// each forwarded `open`/`activate`, carrying the launching process's platform
+// data. GtkApplication only reads "desktop-startup-id" from it, which is enough
+// on X11 (GDK takes the user time from its _TIME suffix, and
+// gtk_window_present uses that). Wayland launchers may instead hand over only
+// an xdg-activation token, which GLib forwards as "activation-token" and GTK 3
+// drops - without it the compositor refuses the focus request and the window
+// just flashes. Give the token to GDK so the next present activates with it.
+static void my_application_before_emit(GApplication* application,
+                                       GVariant* platform_data) {
+  G_APPLICATION_CLASS(my_application_parent_class)
+      ->before_emit(application, platform_data);
+#ifdef GDK_WINDOWING_WAYLAND
+  GdkDisplay* display = gdk_display_get_default();
+  if (display == nullptr || !GDK_IS_WAYLAND_DISPLAY(display)) return;
+  const char* token = nullptr;
+  if (g_variant_lookup(platform_data, "activation-token", "&s", &token) &&
+      token != nullptr && token[0] != '\0') {
+    gdk_wayland_display_set_startup_notification_id(display, token);
+  }
+#endif
+}
+
 // Implements GApplication::startup.
 static void my_application_startup(GApplication* application) {
   // MyApplication* self = MY_APPLICATION(object);
@@ -574,6 +610,7 @@ static void my_application_dispose(GObject* object) {
 static void my_application_class_init(MyApplicationClass* klass) {
   G_APPLICATION_CLASS(klass)->activate = my_application_activate;
   G_APPLICATION_CLASS(klass)->open = my_application_open;
+  G_APPLICATION_CLASS(klass)->before_emit = my_application_before_emit;
   G_APPLICATION_CLASS(klass)->startup = my_application_startup;
   G_APPLICATION_CLASS(klass)->shutdown = my_application_shutdown;
   G_OBJECT_CLASS(klass)->dispose = my_application_dispose;

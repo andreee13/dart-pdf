@@ -610,6 +610,15 @@ class AppLocalizationsVi extends AppLocalizations {
       'Không thể sao chép ảnh chụp vào bảng nhớ tạm';
 
   @override
+  String get editorSearchTabs => 'Tìm kiếm thẻ';
+
+  @override
+  String get editorClearTabSearch => 'Xóa tìm kiếm';
+
+  @override
+  String get editorNoMatchingTabs => 'Không có thẻ phù hợp';
+
+  @override
   String get editorTabs => 'Thẻ';
 
   @override
@@ -920,6 +929,18 @@ class AppLocalizationsVi extends AppLocalizations {
 
   @override
   String get undo => 'Hoàn tác';
+
+  @override
+  String get welcomeCopyName => 'Sao chép tên';
+
+  @override
+  String get welcomeCopyPath => 'Sao chép đường dẫn';
+
+  @override
+  String get welcomeOpen => 'Mở';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Mở trong cửa sổ mới';
 
   @override
   String get welcomeOpenPdf => 'Mở một PDF';

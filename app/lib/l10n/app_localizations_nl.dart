@@ -617,6 +617,15 @@ class AppLocalizationsNl extends AppLocalizations {
       'Kan momentopname niet naar klembord kopiëren';
 
   @override
+  String get editorSearchTabs => 'Tabbladen zoeken';
+
+  @override
+  String get editorClearTabSearch => 'Zoekopdracht wissen';
+
+  @override
+  String get editorNoMatchingTabs => 'Geen overeenkomende tabbladen';
+
+  @override
   String get editorTabs => 'Tabbladen';
 
   @override
@@ -928,6 +937,18 @@ class AppLocalizationsNl extends AppLocalizations {
 
   @override
   String get undo => 'Ongedaan maken';
+
+  @override
+  String get welcomeCopyName => 'Naam kopiëren';
+
+  @override
+  String get welcomeCopyPath => 'Pad kopiëren';
+
+  @override
+  String get welcomeOpen => 'Openen';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Openen in nieuw venster';
 
   @override
   String get welcomeOpenPdf => 'Een PDF openen';

@@ -617,6 +617,15 @@ class AppLocalizationsPt extends AppLocalizations {
       'Não foi possível copiar o instantâneo para a área de transferência';
 
   @override
+  String get editorSearchTabs => 'Pesquisar abas';
+
+  @override
+  String get editorClearTabSearch => 'Limpar pesquisa';
+
+  @override
+  String get editorNoMatchingTabs => 'Nenhuma aba correspondente';
+
+  @override
   String get editorTabs => 'Abas';
 
   @override
@@ -927,6 +936,18 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get undo => 'Desfazer';
+
+  @override
+  String get welcomeCopyName => 'Copiar nome';
+
+  @override
+  String get welcomeCopyPath => 'Copiar caminho';
+
+  @override
+  String get welcomeOpen => 'Abrir';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Abrir em uma nova janela';
 
   @override
   String get welcomeOpenPdf => 'Abrir um PDF';

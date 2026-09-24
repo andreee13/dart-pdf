@@ -630,6 +630,15 @@ class AppLocalizationsPl extends AppLocalizations {
       'Nie udało się skopiować migawki do schowka';
 
   @override
+  String get editorSearchTabs => 'Szukaj kart';
+
+  @override
+  String get editorClearTabSearch => 'Wyczyść wyszukiwanie';
+
+  @override
+  String get editorNoMatchingTabs => 'Brak pasujących kart';
+
+  @override
   String get editorTabs => 'Karty';
 
   @override
@@ -951,6 +960,18 @@ class AppLocalizationsPl extends AppLocalizations {
 
   @override
   String get undo => 'Cofnij';
+
+  @override
+  String get welcomeCopyName => 'Kopiuj nazwę';
+
+  @override
+  String get welcomeCopyPath => 'Kopiuj ścieżkę';
+
+  @override
+  String get welcomeOpen => 'Otwórz';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Otwórz w nowym oknie';
 
   @override
   String get welcomeOpenPdf => 'Otwórz plik PDF';

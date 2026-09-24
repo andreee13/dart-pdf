@@ -2,10 +2,38 @@
 
 ## Unreleased
 
+- Fix digital signature boxes cropping their text. Placing a signature on a
+  short, wide line cut the top off "Digitally signed by ..." and the bottom off
+  the last line; the box now sizes its text to the room it actually has, and a
+  handwritten signature fills more of a short box.
+- Switch to the page grid in one window and only that window switches. The view
+  mode (Pages / Reflow text / Page grid) was stored once for the whole app, so
+  picking one changed every open window at once; it now belongs to the window
+  you picked it in, shared by that window's tabs. The choice is still
+  remembered as the mode the next window - and the next launch - opens in.
+
+## 4.5.0
+
 - Ship the release notes with the app: **What's new** (Settings > About, or the
   command palette) reads the bundled `CHANGELOG.md` and marks the section the
   running build came from, so the notes can't drift from the binary and need no
   network call.
+- Fix jagged, broken-looking PDF text and line art on Linux. Pages rendered
+  without antialiasing on most desktop graphics drivers, so thin serifs and
+  hairlines broke up. The Linux app now renders with Skia.
+- Open exported pages in a new tab after saving them, and report whether the
+  export was written.
+- Choose between Pages, Reflow text and Page grid as one view-mode picker
+  instead of two checkmarks that silently cleared each other.
+- Space unembedded Helvetica, Times and Courier text as it was written, using
+  bundled metric-compatible faces instead of whatever the host has installed.
+- Keep a text selection that spans separately drawn runs as one continuous
+  box per line, without bridging the gutter between columns.
+- Select Chinese, Japanese and Korean text across the full height of the
+  characters.
+- Draw outlined (stroked) text at a visible weight, including text stroked
+  with a zero line width.
+- Double-clicking a page in the page grid now opens that page, not page 1.
 
 ## 4.4.0
 

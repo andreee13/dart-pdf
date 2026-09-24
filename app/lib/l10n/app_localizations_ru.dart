@@ -617,6 +617,15 @@ class AppLocalizationsRu extends AppLocalizations {
       'Не удалось скопировать снимок в буфер обмена';
 
   @override
+  String get editorSearchTabs => 'Поиск по вкладкам';
+
+  @override
+  String get editorClearTabSearch => 'Очистить поиск';
+
+  @override
+  String get editorNoMatchingTabs => 'Нет подходящих вкладок';
+
+  @override
   String get editorTabs => 'Вкладки';
 
   @override
@@ -935,6 +944,18 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get undo => 'Отменить';
+
+  @override
+  String get welcomeCopyName => 'Копировать имя';
+
+  @override
+  String get welcomeCopyPath => 'Копировать путь';
+
+  @override
+  String get welcomeOpen => 'Открыть';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Открыть в новом окне';
 
   @override
   String get welcomeOpenPdf => 'Открыть PDF';

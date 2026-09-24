@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+- Draw unembedded Calibri in Carlito instead of TeX Gyre Heros.
+  `pdfBundledSubstituteFor` had no Calibri entry, so it fell through to the
+  default sans, and Helvetica's advances are much wider than Calibri's - with
+  every character pinned to the PDF's own pen offset by
+  `exactSubstitutedGlyphPlacement`, the surplus had nowhere to go and the
+  glyphs crowded into each other - which is what an Office-printed cover page
+  looked like. Carlito matches Calibri's advances exactly, in all four styles.
+  The faces come from the optional `dart_pdf_editor_assets` package; without
+  it, the fallback chain now names a host Carlito or Calibri before anything
+  else. `PdfBundledSubstitute` gained `assetSuffix` (Carlito is TrueType where
+  the TeX Gyre faces are CFF) and `fontFaceFormat`, which the web worker's
+  `FontFace` now names instead of assuming `opentype`.
+- Give each window its own view mode. `PdfEditingPreferences` is one object per
+  process, so reading the live mode off it meant switching to the page grid (or
+  reflow) in one window switched every other window with it. The live mode now
+  belongs to the window: `PdfViewModeController` holds it, `PdfEditorView` and
+  `PdfReader` take it as `viewMode:`, and a multi-window host creates one per
+  window and hands it to every shell that window builds - so all of that
+  window's tabs share a mode and no other window follows.
+  `PdfEditingPreferences.viewMode` still persists each choice, now as the mode
+  the NEXT window starts in and the one the next launch restores. A shell given
+  no controller owns one seeded from - and written back to - the preferences,
+  so a single-window host is unchanged. `pdfShellViewModeControls` takes
+  `viewMode:` in place of `preferences:`, and `PdfShellViewOptionsButton` takes
+  an optional `viewMode:` that falls back to its preferences.
+- Hold Shift while dragging a line, polyline or polygon vertex handle to
+  straighten the segment being reshaped onto the nearest 45° axis, the same
+  constraint the tools already apply while drawing. A vertex with a neighbour
+  on each side (every vertex of a polygon, whose ends wrap) takes whichever of
+  its two segments the pointer was already closest to lining up. Callout
+  leader handles keep their free aim.
+
+## 4.5.0
+
 - Group the view-options menu around what its rows actually do. Reflow text
   and the page grid each REPLACE the page viewer, but they were drawn as two
   independent checkmarks among the display overlays, and each silently cleared
@@ -31,6 +65,24 @@
 - Export the substitution policy (`PdfBundledSubstitute`,
   `pdfBundledSubstituteFor`) so a host can resolve the same faces the renderer
   does.
+- Keep a text selection that crosses separately drawn runs continuous:
+  selection rects and the quads `addMarkup` saves are normalized to one box
+  per visual line, joining fragments only across a gap of up to 1.5 line
+  heights so a column gutter keeps its two boxes.
+- Hit-test text with each run's own ascent and descent, so CJK lines select
+  over the whole glyph height.
+- Floor stroked text (rendering modes 1/2/5/6) at one device pixel on both
+  text paths. A `0 w` width no longer becomes a hundredth of an em in the
+  substituted-font painter, which left stroked text nearly invisible.
+- Add an off-by-default glyph stem darkening flag,
+  `CanvasPdfDevice.glyphStemDarkening`, which darkens thin stems of small text
+  without widening them.
+- Keep the viewer's `State` when the editing toolbar comes and goes, so
+  double-clicking a page in the page grid lands on that page instead of
+  rewinding to page 1.
+- Opt the example's Linux runner out of Impeller (`DARTPDF_IMPELLER=1` turns
+  it back on): on desktop OpenGL Impeller fills PDF glyph paths without
+  antialiasing.
 
 ## 4.4.0
 

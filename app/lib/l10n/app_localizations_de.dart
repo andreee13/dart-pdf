@@ -620,6 +620,15 @@ class AppLocalizationsDe extends AppLocalizations {
       'Schnappschuss konnte nicht in die Zwischenablage kopiert werden';
 
   @override
+  String get editorSearchTabs => 'Tabs durchsuchen';
+
+  @override
+  String get editorClearTabSearch => 'Suche löschen';
+
+  @override
+  String get editorNoMatchingTabs => 'Keine passenden Tabs';
+
+  @override
   String get editorTabs => 'Tabs';
 
   @override
@@ -932,6 +941,18 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get undo => 'Rückgängig';
+
+  @override
+  String get welcomeCopyName => 'Namen kopieren';
+
+  @override
+  String get welcomeCopyPath => 'Pfad kopieren';
+
+  @override
+  String get welcomeOpen => 'Öffnen';
+
+  @override
+  String get welcomeOpenInNewWindow => 'In neuem Fenster öffnen';
 
   @override
   String get welcomeOpenPdf => 'PDF öffnen';

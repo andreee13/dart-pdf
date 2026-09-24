@@ -1077,6 +1077,24 @@ abstract class AppLocalizations {
   /// **'Could not copy snapshot to clipboard'**
   String get editorSnapshotCopyFailed;
 
+  /// Hint of the search field in the open-tabs grid overlay that filters tabs by title.
+  ///
+  /// In en, this message translates to:
+  /// **'Search tabs'**
+  String get editorSearchTabs;
+
+  /// Tooltip of the button that clears the open-tabs grid search field.
+  ///
+  /// In en, this message translates to:
+  /// **'Clear search'**
+  String get editorClearTabSearch;
+
+  /// Shown in the open-tabs grid when no tab title matches the search.
+  ///
+  /// In en, this message translates to:
+  /// **'No matching tabs'**
+  String get editorNoMatchingTabs;
+
   /// Header of the open-tabs grid overlay.
   ///
   /// In en, this message translates to:
@@ -1556,6 +1574,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Undo'**
   String get undo;
+
+  /// Recent-file context-menu item that copies the document name to the clipboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy name'**
+  String get welcomeCopyName;
+
+  /// Recent-file context-menu item that copies the document's file path to the clipboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy path'**
+  String get welcomeCopyPath;
+
+  /// Recent-file context-menu item that opens the document.
+  ///
+  /// In en, this message translates to:
+  /// **'Open'**
+  String get welcomeOpen;
+
+  /// Recent-file context-menu item that opens the document in a second application window.
+  ///
+  /// In en, this message translates to:
+  /// **'Open in new window'**
+  String get welcomeOpenInNewWindow;
 
   /// Primary button on the welcome screen that opens a PDF file.
   ///

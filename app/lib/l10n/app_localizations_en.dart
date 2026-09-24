@@ -611,6 +611,15 @@ class AppLocalizationsEn extends AppLocalizations {
   String get editorSnapshotCopyFailed => 'Could not copy snapshot to clipboard';
 
   @override
+  String get editorSearchTabs => 'Search tabs';
+
+  @override
+  String get editorClearTabSearch => 'Clear search';
+
+  @override
+  String get editorNoMatchingTabs => 'No matching tabs';
+
+  @override
   String get editorTabs => 'Tabs';
 
   @override
@@ -918,6 +927,18 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get undo => 'Undo';
+
+  @override
+  String get welcomeCopyName => 'Copy name';
+
+  @override
+  String get welcomeCopyPath => 'Copy path';
+
+  @override
+  String get welcomeOpen => 'Open';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Open in new window';
 
   @override
   String get welcomeOpenPdf => 'Open a PDF';
@@ -1824,6 +1845,15 @@ class AppLocalizationsEnAu extends AppLocalizationsEn {
   String get editorSnapshotCopyFailed => 'Could not copy snapshot to clipboard';
 
   @override
+  String get editorSearchTabs => 'Search tabs';
+
+  @override
+  String get editorClearTabSearch => 'Clear search';
+
+  @override
+  String get editorNoMatchingTabs => 'No matching tabs';
+
+  @override
   String get editorTabs => 'Tabs';
 
   @override
@@ -2131,6 +2161,18 @@ class AppLocalizationsEnAu extends AppLocalizationsEn {
 
   @override
   String get undo => 'Undo';
+
+  @override
+  String get welcomeCopyName => 'Copy name';
+
+  @override
+  String get welcomeCopyPath => 'Copy path';
+
+  @override
+  String get welcomeOpen => 'Open';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Open in new window';
 
   @override
   String get welcomeOpenPdf => 'Open a PDF';
@@ -3037,6 +3079,15 @@ class AppLocalizationsEnGb extends AppLocalizationsEn {
   String get editorSnapshotCopyFailed => 'Could not copy snapshot to clipboard';
 
   @override
+  String get editorSearchTabs => 'Search tabs';
+
+  @override
+  String get editorClearTabSearch => 'Clear search';
+
+  @override
+  String get editorNoMatchingTabs => 'No matching tabs';
+
+  @override
   String get editorTabs => 'Tabs';
 
   @override
@@ -3344,6 +3395,18 @@ class AppLocalizationsEnGb extends AppLocalizationsEn {
 
   @override
   String get undo => 'Undo';
+
+  @override
+  String get welcomeCopyName => 'Copy name';
+
+  @override
+  String get welcomeCopyPath => 'Copy path';
+
+  @override
+  String get welcomeOpen => 'Open';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Open in new window';
 
   @override
   String get welcomeOpenPdf => 'Open a PDF';

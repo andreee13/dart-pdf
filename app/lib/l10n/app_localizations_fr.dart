@@ -619,6 +619,15 @@ class AppLocalizationsFr extends AppLocalizations {
       'Impossible de copier la capture dans le presse-papiers';
 
   @override
+  String get editorSearchTabs => 'Rechercher des onglets';
+
+  @override
+  String get editorClearTabSearch => 'Effacer la recherche';
+
+  @override
+  String get editorNoMatchingTabs => 'Aucun onglet correspondant';
+
+  @override
   String get editorTabs => 'Onglets';
 
   @override
@@ -931,6 +940,18 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get undo => 'Annuler';
+
+  @override
+  String get welcomeCopyName => 'Copier le nom';
+
+  @override
+  String get welcomeCopyPath => 'Copier le chemin';
+
+  @override
+  String get welcomeOpen => 'Ouvrir';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Ouvrir dans une nouvelle fenêtre';
 
   @override
   String get welcomeOpenPdf => 'Ouvrir un PDF';

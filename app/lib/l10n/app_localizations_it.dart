@@ -617,6 +617,15 @@ class AppLocalizationsIt extends AppLocalizations {
       'Impossibile copiare l\'istantanea negli appunti';
 
   @override
+  String get editorSearchTabs => 'Cerca nelle schede';
+
+  @override
+  String get editorClearTabSearch => 'Cancella ricerca';
+
+  @override
+  String get editorNoMatchingTabs => 'Nessuna scheda corrispondente';
+
+  @override
   String get editorTabs => 'Schede';
 
   @override
@@ -929,6 +938,18 @@ class AppLocalizationsIt extends AppLocalizations {
 
   @override
   String get undo => 'Annulla';
+
+  @override
+  String get welcomeCopyName => 'Copia nome';
+
+  @override
+  String get welcomeCopyPath => 'Copia percorso';
+
+  @override
+  String get welcomeOpen => 'Apri';
+
+  @override
+  String get welcomeOpenInNewWindow => 'Apri in una nuova finestra';
 
   @override
   String get welcomeOpenPdf => 'Apri un PDF';
