@@ -1070,6 +1070,7 @@ extension PdfFormFilling on PdfEditor {
           font: font,
           fontSize: size,
           align: align,
+          textDirection: resolvedDirection,
           padding: pad,
           verticalAlignment: verticalAlignment,
           measure: (s) => measure(s, size),
@@ -1136,6 +1137,7 @@ extension PdfFormFilling on PdfEditor {
     required PdfTextFont font,
     required double fontSize,
     required PdfTextAlign align,
+    required PdfTextDirection textDirection,
     required double padding,
     required PdfFormTextVerticalAlignment? verticalAlignment,
     required double Function(String s) measure,
@@ -1146,11 +1148,10 @@ extension PdfFormFilling on PdfEditor {
       for (final r in text.runes) String.fromCharCode(r),
     ].take(cells).toList();
     final cellWidth = box.width / cells;
-    final first = switch (align) {
-      PdfTextAlign.left => 0,
-      PdfTextAlign.center => (cells - glyphs.length) ~/ 2,
-      PdfTextAlign.right => cells - glyphs.length,
-    };
+    final first =
+        (align == PdfTextAlign.right || textDirection == PdfTextDirection.rtl)
+            ? cells - glyphs.length
+            : 0;
     final ascent = fontSize * font.ascent / 1000;
     final y = switch (verticalAlignment) {
       PdfFormTextVerticalAlignment.top => box.top - padding - ascent,
