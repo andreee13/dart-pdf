@@ -684,7 +684,7 @@
             "name": "Does DartPDF support fillable AcroForm fields?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Yes. It reads and fills text, checkbox, radio, combo box, list box, and push-button fields, regenerates their appearance streams so the filled values print and display in other viewers, and can flatten the form into page content. It can also add text, checkbox, and push-button fields to a PDF."
+              "text": "Yes. It reads and fills text, checkbox, radio, combo box, list box, and push-button fields, regenerates their appearance streams so the filled values print and display in other viewers, and can flatten the form into page content. It can also add every one of those field types to a PDF, plus empty signature fields for someone to sign later."
             }
           },
           {
@@ -700,7 +700,7 @@
             "name": "Does DartPDF support XFA forms or form JavaScript?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. DartPDF supports AcroForms. XFA forms are not supported, and there is deliberately no JavaScript engine, so calculated fields and format scripts do not run."
+              "text": "Partly. DartPDF fills AcroForms. Hybrid XFA forms fill through their AcroForm fields, and DartPDF removes the stale XFA copy when you fill them so other viewers show the new values. Dynamic, XFA-only forms can't be filled: DartPDF detects them and the editor says so. There is deliberately no JavaScript engine, but the built-in AF helper scripts most forms use are recognised and run natively: AFSimple_Calculate and simplified field notation totals (recalculated in the form's calculation order after every fill), AFNumber, AFPercent, AFDate, AFTime and AFSpecial formats and keystroke checks, and AFRange_Validate. Any other script is skipped and reported, so your app can see what did not run."
             }
           }
         ]
@@ -774,7 +774,7 @@
         <div class="meta">
           <span>By <a href="https://github.com/ben-milanko">Ben Milanko</a>, maintainer of dart-pdf</span>
           <span>Published 23 September 2026</span>
-          <span>Applies to <code>dart_pdf_editor</code> / <code>pdf_document</code> 4.5.0</span>
+          <span>Applies to <code>dart_pdf_editor</code> / <code>pdf_document</code> 5.0.0</span>
         </div>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://dart-pdf-demo.web.app">Try it in the live demo</a>
@@ -826,7 +826,8 @@
               <tbody>
                 <tr>
                   <td>Text (single-line &amp; multiline)</td>
-                  <td>Yes: wrapping, auto-size, alignment, RTL text, custom font/size/colour</td>
+                  <td>Yes: wrapping, auto-size, alignment, RTL text, custom font/size/colour, <code>/MaxLen</code>
+                    limits, comb fields (one character per box), password masking</td>
                   <td>Yes</td>
                 </tr>
                 <tr>
@@ -841,7 +842,7 @@
                 </tr>
                 <tr>
                   <td>Combo box / list box</td>
-                  <td>Yes: by export or display value; editable combos accept free text</td>
+                  <td>Yes: by export or display value; editable combos accept free text; multi-select list boxes take several values</td>
                   <td>Not yet</td>
                 </tr>
                 <tr>
@@ -861,8 +862,36 @@
             looks on the page are stored separately. A library that only sets the value leaves a form that looks
             empty in some viewers, or that Acrobat redraws with its own layout. DartPDF redraws every field it fills,
             including wrapping, auto-sizing, quadding (alignment), borders, backgrounds, and page rotation, and then
-            clears <code>/NeedAppearances</code>. The saved file looks the same in every viewer, and it prints
+            clears <code>/NeedAppearances</code>. A value longer than the field's <code>/MaxLen</code> is cut to
+            fit, a comb field puts one character in each box, and a password field is drawn as asterisks and
+            edited masked, so the password never appears on the page. Give the editing controller a
+            <code>PdfFormSecretStore</code> and a password isn't written into the PDF at all, as the PDF
+            specification asks: the file keeps a fixed-length mask, and the value is kept in the device's
+            keychain, so it comes back when the same document is reopened on that device. The DartPDF app does
+            this on desktop and mobile. On the web it keeps passwords only in memory until the page closes. The saved file looks the same in every viewer, and it prints
             correctly.</p>
+
+          <h3 id="forms-scripts">Calculated totals, formats, and validation</h3>
+          <p>Most form scripts are calls to a small set of built-in <code>AF*</code> helpers. DartPDF recognises them
+            and runs a Dart version of each, so these work with no JavaScript engine:</p>
+          <ul>
+            <li><strong>Calculations:</strong> <code>AFSimple_Calculate</code> (sum, average, product, min, max) and
+              simplified field notation such as <code>Qty * Price</code>. They re-run in the form's calculation
+              order (<code>/CO</code>) after every fill, including read-only total fields.</li>
+            <li><strong>Formats:</strong> <code>AFNumber_Format</code> (separators, negative styles, currency),
+              <code>AFPercent_Format</code>, <code>AFDate_FormatEx</code>/<code>AFTime_Format</code>, and
+              <code>AFSpecial_Format</code> (zip, zip+4, phone, SSN). The field shows the formatted text and
+              stores the raw value, as Acrobat does.</li>
+            <li><strong>Keystroke and validation:</strong> the matching <code>*_Keystroke</code> helpers and
+              <code>AFRange_Validate</code>. In the Flutter editor a number field won't accept letters, and an
+              out-of-range or unreadable value is refused with a message. From code,
+              <code>editor.enterTextValue(field, text)</code> applies the same checks and throws a
+              <code>PdfFieldInputException</code>. <code>setTextValue</code> stays the unchecked programmatic
+              setter.</li>
+          </ul>
+          <p>Scripts that aren't one of these helpers never run. <code>field.scripts</code> lists which of a field's
+            scripts were recognised and which were skipped, so your app can warn about forms that depend on custom
+            code.</p>
 
           <h3 id="forms-flutter">In a Flutter app</h3>
           <p>Form filling is on by default. <code>PdfEditorView</code> (the full editor) and <code>PdfReader</code>
@@ -883,6 +912,10 @@ session.setFormChoiceValue(<span class="string">'country'</span>, <span class="s
 
 <span class="keyword">final</span> Uint8List filled = session.bytes;</code></pre>
           <p>Every change is an incremental revision, so undo and redo work for form input too.</p>
+          <p>On a keyboard, Tab moves to the next field and Shift+Tab to the previous one, across pages. The
+            order follows each page's <code>/Tabs</code> setting (row, column, or structure order) and falls
+            back to the order the fields are stored in. Space toggles a focused checkbox or radio button.
+            Read-only, hidden, button, and signature fields are skipped.</p>
 
           <h3 id="forms-dart">In pure Dart (server, CLI, tests)</h3>
           <p>The form engine is in <code>pdf_document</code>, which has no Flutter dependency. That makes it a good
@@ -907,11 +940,30 @@ Uint8List fillApplication(Uint8List template) {
 
   <span class="keyword">return</span> editor.save();
 }</code></pre>
-          <p>To add fields, use <code>addTextField</code>, <code>addCheckBoxField</code>, and
-            <code>addPushButtonField</code>. <code>renameField</code>, <code>removeField</code>, and
-            <code>changeFieldType</code> handle field management. If the document has no AcroForm yet, the first
-            new field creates one. The editor UI has matching tools, so users can draw fields onto a plain PDF and
-            turn it into a fillable form.</p>
+          <p>To add fields, use <code>addTextField</code>, <code>addCheckBoxField</code>,
+            <code>addPushButtonField</code>, <code>addRadioGroup</code> (one field, one button per option, grown
+            later with <code>addRadioButton</code>), <code>addComboBoxField</code> and <code>addListBoxField</code>
+            (options as export/display pairs, edited later with <code>setChoiceOptions</code>), and
+            <code>addSignatureField</code> (an empty box for someone to sign later). <code>renameField</code>,
+            <code>removeField</code>, and <code>changeFieldType</code> handle field management. If the document has
+            no AcroForm yet, the first new field creates one. Every new field gets its appearance generated the
+            same way filling does. The editor UI has matching tools, so users can draw fields onto a plain PDF and
+            turn it into a fillable form, then edit a choice field's options or add buttons to a radio group.</p>
+          <pre><code><span class="keyword">final</span> editor = PdfEditor(PdfDocument.open(plainPdf));
+editor.addRadioGroup(0, <span class="string">'size'</span>, [
+  (PdfRect(72, 500, 88, 516), <span class="string">'S'</span>),
+  (PdfRect(100, 500, 116, 516), <span class="string">'M'</span>),
+]);
+editor.addComboBoxField(0, <span class="string">'country'</span>, PdfRect(72, 450, 272, 472), [
+  (<span class="string">'AU'</span>, <span class="string">'Australia'</span>),
+  (<span class="string">'NZ'</span>, <span class="string">'New Zealand'</span>),
+]);
+editor.addSignatureField(0, <span class="string">'Approver'</span>, PdfRect(72, 72, 272, 132));
+<span class="keyword">final</span> Uint8List form = editor.save();
+
+<span class="comment">// Later, whoever signs fills the placed field by name:</span>
+PdfEditor(PdfDocument.open(form)).saveSigned(
+  privateKey: key, certificates: chain, fieldName: <span class="string">'Approver'</span>);</code></pre>
         </section>
 
         <section id="drawn">
@@ -974,12 +1026,18 @@ Uint8List fillApplication(Uint8List template) {
                 </tr>
                 <tr>
                   <td>Existing fields</td>
-                  <td>Signs into an empty signature field a form designer already placed</td>
+                  <td>Signs into an empty signature field a form designer already placed, including one added with
+                    <code>addSignatureField</code> or the editor's form tool</td>
                 </tr>
                 <tr>
                   <td>Certification</td>
                   <td>Certify (DocMDP) signatures with P=1/2/3 change permissions; additional approval signatures
                     are refused after P=1 certification. General editing APIs do not enforce DocMDP permissions.</td>
+                </tr>
+                <tr>
+                  <td>Password-protected PDFs</td>
+                  <td>Signs RC4, AES-128, and AES-256 encrypted files in place. The document keeps its password
+                    and the signature validates after reopening.</td>
                 </tr>
                 <tr>
                   <td>Multiple signers</td>
@@ -989,7 +1047,8 @@ Uint8List fillApplication(Uint8List template) {
                 <tr>
                   <td>Validation</td>
                   <td>Checks the digest, the signature, and whether the whole document is covered; builds the chain
-                    against your trust store; reports PAdES level, timestamp, and embedded revocation data</td>
+                    against your trust store; checks the signer and each intermediate for revocation (embedded
+                    data, plus live OCSP/CRL through a client you supply); reports PAdES level and timestamp</td>
                 </tr>
               </tbody>
             </table>
@@ -1045,31 +1104,58 @@ await session.addDigitalSignature(
   print(<span class="string">'${sig.signerName}: intact=${result.intact} '</span>
       <span class="string">'trusted=${result.chainTrusted} level=${result.padesLevel}'</span>);
 }</code></pre>
-          <p>The editor's annotations panel shows the same result next to each signature.</p>
+          <p>To also catch a certificate revoked since signing, validate online. The library still makes no
+            network calls of its own. <code>pdfOnlineRevocationClient</code> asks each certificate's OCSP
+            responder and falls back to its CRL, using an HTTP function you pass in:</p>
+          <pre><code><span class="keyword">final</span> result = <span class="keyword">await</span> sig.validateOnline(
+  trustStore: trustStore,
+  revocationClient: pdfOnlineRevocationClient(fetch: myHttpFetch),
+);
+<span class="keyword">for</span> (<span class="keyword">final</span> r <span class="keyword">in</span> result.revocation) {
+  print(<span class="string">'${r.certificate.subjectCommonName}: ${r.status} (${r.source})'</span>);
+}</code></pre>
+          <p>A certificate that was revoked makes the signature untrusted, unless a trusted timestamp proves the
+            document was signed before the revocation. If a status can't be checked (the responder is down, or
+            its answer is stale or doesn't verify), the result says so and leaves the trust verdict alone.
+            Trusted roots are opt-in: <code>package:pdf_document/trust_lists.dart</code> downloads and verifies the
+            EU trusted lists, and can load an Adobe Approved Trust List file you already have.</p>
+          <p>The editor's annotations panel shows the same result next to each signature: trusted, self-signed,
+            issued by an authority you don't trust, revoked, or revocation unknown. The
+            <a href="/">DartPDF app</a> checks revocation online and trusts the EU trusted lists by default
+            outside the browser.</p>
         </section>
 
         <section id="limits">
           <h2>What isn't supported (yet)</h2>
           <p>These are the gaps you're most likely to hit, so you know before you build on it:</p>
           <ul>
-            <li><strong>XFA forms.</strong> XFA is the older XML-based Adobe forms format. Pure-XFA (“dynamic”)
-              forms won't show their fields. Hybrid forms work through their AcroForm half.</li>
-            <li><strong>Form JavaScript.</strong> There is deliberately no JS engine, so calculated totals,
-              format/validation scripts, and scripted show/hide don't run. Scripts are exposed read-only so your
-              app can inspect them.</li>
-            <li><strong>Comb fields, <code>/MaxLen</code>, and password masking</strong> are not enforced when
-              filling.</li>
-            <li><strong>Tab to the next field</strong> isn't implemented yet. Users tap each field.</li>
+            <li><strong>Dynamic XFA forms.</strong> XFA is the older XML-based Adobe forms format. Pure-XFA
+              (“dynamic”) forms keep their fields only in the XFA data, so they can't be filled here. The editor
+              shows a notice for them, and <code>PdfAcroForm.isDynamicXfa</code> lets your app detect them.
+              Hybrid forms fill through their AcroForm fields. The first fill (or a flatten) removes the
+              <code>/XFA</code> entry, so XFA-aware viewers show the AcroForm values rather than the old XFA
+              data.</li>
+            <li><strong>Custom form JavaScript.</strong> There is deliberately no JS engine. The built-in
+              <code>AF*</code> helpers that most forms use do work without one: <code>AFSimple_Calculate</code>
+              and simplified field notation totals re-run in <code>/CO</code> order after every fill,
+              <code>AFNumber</code>/<code>AFPercent</code>/<code>AFDate</code>/<code>AFTime</code>/<code>AFSpecial</code>
+              formats change what a field shows while keeping its stored value, and their keystroke checks plus
+              <code>AFRange_Validate</code> refuse invalid entries with a message. Hand-written scripts, including
+              scripted show/hide, are skipped; each field reports which of its scripts ran and which didn't
+              (<code>field.scripts</code>).</li>
             <li><strong>Multi-select list boxes</strong> take a single value.</li>
             <li><strong>Authoring</strong> covers text, checkbox, and image-button fields. You can't yet add radio
               groups, choice fields, or empty signature fields for someone else to sign later.</li>
-            <li><strong>Signing encrypted (password-protected) PDFs</strong> is refused. Sign an unencrypted
-              copy instead. Adding password encryption afterwards rewrites the signed bytes and invalidates
-              the signature; an encrypted, signed output is not currently supported.</li>
-            <li><strong>Trust roots.</strong> No certificate authorities are bundled. Validation tells you whether
-              the chain reaches a root you supplied (for example, the AATL or your organisation's CA), and it
-              doesn't query live revocation during validation. A self-signed signature validates as intact, but
-              Acrobat shows its signer as unknown until the certificate is trusted.</li>
+            <li><strong>Bundled trust roots.</strong> No certificate authorities ship inside the library. You can
+              load the EU trusted lists at run time (the DartPDF app does this outside the browser), your
+              organisation's CA, or Adobe's Approved Trust List. We never bundle or redistribute the AATL. Instead,
+              the DartPDF app has a one-click, opt-in "Trust Adobe Approved Trust List" option (in Settings, or
+              under an unknown signer in the signature panel) that downloads it from Adobe on your device. Nothing
+              about your documents is sent. A self-signed signature validates as intact, but Acrobat shows its
+              signer as unknown until the certificate is trusted.</li>
+            <li><strong>Revocation in the browser.</strong> Live OCSP/CRL checks need a transport that can reach
+              the CA's servers, which browsers usually block (CORS), so the web app only uses revocation data
+              embedded in the document.</li>
           </ul>
           <p>If one of these blocks you, <a href="https://github.com/ben-milanko/dart-pdf/issues">open an issue</a>
             with a sample PDF. Real forms decide what we work on next.</p>
@@ -1089,6 +1175,12 @@ await session.addDigitalSignature(
               the whole document. A certification signature may still forbid the change: DocMDP P=1 forbids
               form filling, while P=2 and P=3 permit it. The editing APIs do not enforce those permissions, so
               check the document's certification policy before filling it.</p>
+
+            <h3>Can I sign a password-protected PDF?</h3>
+            <p>Yes. Open it with its password, fill it, and sign it. The new revision is encrypted like the rest
+              of the file. The one exception is the signature value itself, which the PDF standard leaves
+              unencrypted so any reader can verify it. The file keeps its original protection. Every signing path
+              works this way: plain signatures, all PAdES levels, document timestamps, and certification.</p>
 
             <h3>Can I fill forms without Flutter?</h3>
             <p>Yes. <code>pdf_document</code> is pure Dart with no <code>dart:io</code> or Flutter imports, so the
