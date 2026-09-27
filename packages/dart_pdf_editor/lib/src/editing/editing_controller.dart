@@ -477,11 +477,13 @@ class PdfEditingController extends ChangeNotifier {
     if (formSecretStore != null) {
       // the identity of the document as opened: /ID[0], or the SHA-256 of
       // these bytes (written as /ID by the first withheld fill, so a saved
-      // copy answers to the same key)
-      _formSecretIdBytes = pdfPermanentDocumentId(_document, bytes: bytes);
-      formSecretsLoaded = _loadFormSecrets();
+      // copy answers to the same key). /ID[0] is a trailer lookup; the hash
+      // is O(file) - ~8 ms/MB on the UI isolate - so it waits for the first
+      // thing filed or read under it ([_resolveFormSecretId]).
+      _formSecretIdBytes = pdfTrailerPermanentId(_document);
+      _openFormSecrets();
     } else {
-      formSecretsLoaded = Future<void>.value();
+      _formSecretsRead.complete();
     }
   }
 
@@ -497,18 +499,156 @@ class PdfEditingController extends ChangeNotifier {
   /// current revision: undo/redo write the value that revision had.
   final PdfFormSecretStore? formSecretStore;
 
+  /// The opened file's /ID[0], or its fallback identity once
+  /// [_resolveFormSecretId] has hashed it.
   Uint8List? _formSecretIdBytes;
 
   /// The [PdfFormSecretStore] key of this document ([pdfFormSecretDocumentId]
   /// of its trailer /ID, or of the SHA-256 of the opened bytes), or null
-  /// without a [formSecretStore].
-  String? get formSecretDocumentId => _formSecretIdBytes == null
-      ? null
-      : pdfFormSecretDocumentId(_formSecretIdBytes!);
+  /// without a [formSecretStore]. For a file without /ID the first read
+  /// hashes the opened bytes.
+  String? get formSecretDocumentId {
+    final id = _resolveFormSecretId();
+    return id == null ? null : pdfFormSecretDocumentId(id);
+  }
+
+  /// The form-secret identity bytes (null without a store), hashing the
+  /// bytes as opened ([pdfFallbackDocumentId]) the first time a file without
+  /// a trailer /ID needs them - a withheld fill, [forgetFormSecrets], an
+  /// undo/redo that moves a stored value, or a store read.
+  ///
+  /// The hash covers the opened prefix, never the current revision: every
+  /// revision appends to that prefix, and the first withheld fill writes
+  /// this value as the file's /ID, so later edits must not move it.
+  Uint8List? _resolveFormSecretId() {
+    if (formSecretStore == null) return null;
+    return _formSecretIdBytes ??= pdfFallbackDocumentId(_openedBytes);
+  }
+
+  /// Decides at open whether this document's stored values need reading
+  /// ([_loadFormSecrets]): only a field the opened file shows as
+  /// withheld-and-filled takes one ([_holdsWithheldValue]).
+  ///
+  /// No /AcroForm: nothing to restore into, decided in O(1). With a trailer
+  /// /ID the store is read now, as it always was - the id is free, and the
+  /// load parses the form only if the store holds something for it. Without
+  /// one, reading the store means hashing the file first, so the decision
+  /// waits for the first read of the form's fields ([_decideFormSecretsOn]):
+  /// the form layer reads them anyway once a page showing a widget attaches,
+  /// or a fill looks a field up, and a password field's prefill needs them
+  /// too. The open itself then touches no field, whatever the form holds.
+  void _openFormSecrets() {
+    _formSecretsPending = _formSecretIdBytes == null;
+    final PdfAcroForm? form;
+    try {
+      form = acroForm;
+    } catch (_) {
+      // a catalog too broken to read: leave it to the load, as before
+      _settleFormSecrets(load: true);
+      return;
+    }
+    if (form == null) {
+      _settleFormSecrets(load: false);
+    } else if (!_formSecretsPending) {
+      _settleFormSecrets(load: true);
+    }
+  }
+
+  /// Whether this no-/ID document still waits for the first read of its
+  /// form fields to decide whether its stored values need reading.
+  bool _formSecretsPending = false;
+
+  final Completer<void> _formSecretsRead = Completer<void>();
+
+  /// Ends the open-time decision: reads the store ([_loadFormSecrets]) when
+  /// [load], and completes [formSecretsLoaded] either way.
+  void _settleFormSecrets({required bool load}) {
+    _formSecretsPending = false;
+    _formSecretsRead.complete(load ? _loadFormSecrets() : null);
+  }
+
+  /// The hook [acroForm] hands [PdfAcroForm.of] while a no-/ID decision is
+  /// pending: settles it off the first read of that form's fields.
+  ///
+  /// [opened] says whether the form is revision 0 - the file as opened, or
+  /// as a redaction burn ([_resetTo], which starts a fresh history) left it,
+  /// the same bytes [_loadFormSecrets] filters against. Only then do its
+  /// fields answer exactly: [fields]`.any(`[_holdsWithheldValue]`)` is the
+  /// very test the load applies, orphan widgets the form reconciles
+  /// included, and it costs one pass over a list the read just built. A form
+  /// read first at a later revision may have lost a field revision 0
+  /// withheld (a Flatten from a cover page; undo brings it back), so it
+  /// falls back to the eager open's load: the hash and the store read, paid
+  /// then rather than at open. Reading revision 0's fields instead would
+  /// skip the hash, but on a small file whose bytes are mostly form that
+  /// read costs several times the hash it saves.
+  void Function(List<PdfFormField>) _decideFormSecretsOn({
+    required bool opened,
+  }) =>
+      (fields) {
+        if (!_formSecretsPending) return;
+        var load = true;
+        if (opened) {
+          try {
+            load = fields.any(_holdsWithheldValue);
+          } catch (_) {
+            // a field too broken to read: leave it to the load
+          }
+        }
+        _settleFormSecrets(load: load);
+      };
+
+  /// Revision 0's bytes: the file as opened, or as a redaction burn left it.
+  Uint8List get _openedBytes => Uint8List.sublistView(_bytes, 0, _revisions[0]);
+
+  /// Settles a pending no-/ID decision now: reads the current revision's
+  /// form fields, which runs [_decideFormSecretsOn]. For a caller that needs
+  /// the stored values without waiting for the form layer - the
+  /// [formSecretsLoaded] getter, a prefill of a field from another
+  /// [PdfAcroForm].
+  void _settleFormSecretsNow() {
+    if (!_formSecretsPending) return;
+    try {
+      acroForm?.fields;
+    } catch (_) {
+      // settled below
+    }
+    if (_formSecretsPending) _settleFormSecrets(load: true);
+  }
+
+  /// A password field whose value the file withholds
+  /// ([PdfFormFilling.passwordWithheldKey]) - the only kind of field a
+  /// [formSecretStore] value is restored into.
+  ///
+  /// The marker goes first: it is one lookup in the field's own dictionary
+  /// (the filler writes it there and nowhere else), while `isPassword` and
+  /// `value` resolve inheritable entries up the /Parent chain. Run over
+  /// every field of a deep hierarchy (/FT on a root hundreds of levels up),
+  /// the other order cost O(fields x depth) - more than the whole-file hash
+  /// the no-/ID decision replaced.
+  static bool _holdsWithheldValue(PdfFormField field) =>
+      field.dict[PdfFormFilling.passwordWithheldKey] ==
+          const CosBoolean(true) &&
+      field.isPassword &&
+      field.value == null;
+
+  /// Whether the form-secret identity has been resolved: at construction
+  /// for a file with a trailer /ID, and only on first need for one without.
+  @visibleForTesting
+  bool get debugFormSecretIdResolved => _formSecretIdBytes != null;
 
   /// Completes once the [formSecretStore]'s values for this document have
-  /// been read (immediately without a store).
-  late final Future<void> formSecretsLoaded;
+  /// been read (immediately without a store, or when the opened file
+  /// withholds no password value).
+  ///
+  /// A file without a trailer /ID reads the store only once something reads
+  /// its form fields - the form layer does as soon as a page showing a
+  /// widget attaches. Asking for this future reads them then and there if
+  /// nothing has yet.
+  Future<void> get formSecretsLoaded {
+    _settleFormSecretsNow();
+    return _formSecretsRead.future;
+  }
 
   /// Parallels [_revisions]: the withheld password values (field name ->
   /// value, `''` for an explicit clear) in effect at each revision. Maps are
@@ -536,20 +676,13 @@ class PdfEditingController extends ChangeNotifier {
     }
     if (_disposed || loaded.isEmpty) return;
     // only fields the file still shows as withheld-and-filled take a value:
-    // a stale entry (the field was cleared or refilled elsewhere) is ignored
-    final form = PdfAcroForm.of(PdfDocument.open(
-        Uint8List.sublistView(_bytes, 0, _revisions.first),
-        password: _password));
+    // a stale entry (the field was cleared or refilled elsewhere) is ignored.
+    // Revision 0 reopens with the authenticated keys, as an undo does
+    final form = PdfAcroForm.of(_openRevision(_openedBytes));
     final usable = <String, String>{};
     loaded.forEach((name, value) {
       final field = form?.fieldNamed(name);
-      if (field != null &&
-          field.isPassword &&
-          field.value == null &&
-          field.dict[PdfFormFilling.passwordWithheldKey] ==
-              const CosBoolean(true)) {
-        usable[name] = value;
-      }
+      if (field != null && _holdsWithheldValue(field)) usable[name] = value;
     });
     if (usable.isEmpty) return;
     for (final secrets in _revisionSecrets) {
@@ -563,6 +696,8 @@ class PdfEditingController extends ChangeNotifier {
   /// value; otherwise [PdfFormField.value].
   String? formFieldTextValue(PdfFormField field) {
     if (formSecretStore != null && field.isPassword) {
+      // a field read off another PdfAcroForm than [acroForm]
+      _settleFormSecretsNow();
       final secret = _revisionSecrets[_cursor][field.name];
       if (secret != null) return secret;
     }
@@ -584,6 +719,8 @@ class PdfEditingController extends ChangeNotifier {
   Future<void> forgetFormSecrets() async {
     final store = formSecretStore;
     if (store == null) return;
+    // nothing left to read back
+    if (_formSecretsPending) _settleFormSecrets(load: false);
     for (var i = 0; i < _revisionSecrets.length; i++) {
       _revisionSecrets[i] = {};
     }
@@ -936,12 +1073,26 @@ class PdfEditingController extends ChangeNotifier {
   ///
   /// [grew] must be true only when [bytes] extends the currently open
   /// document. Undo shrinks the buffer and [_resetTo] replaces it outright,
-  /// and neither is an append - those reopen.
+  /// and neither is an append - those reopen ([_openRevision]).
   void _reloadDocument({required bool grew}) {
     if (grew && _tryApplyIncrementalUpdate()) return;
-    _document = PdfDocument.open(bytes, password: _password);
+    _document = _openRevision(bytes);
     _revisionId++;
   }
+
+  /// Opens [bytes] - another revision of this session's file - with the
+  /// current document's already-authenticated security handler when that
+  /// revision declares the same, unchanged /Encrypt dictionary, else by
+  /// authenticating [_password] like a fresh open.
+  ///
+  /// Every undo target is a byte prefix of the same session buffer, so it
+  /// normally qualifies (same /Encrypt): an undo on an AES-256 file no longer
+  /// re-runs the password hash (Algorithm 2.B - ~10 ms native, ~75 ms web -
+  /// on the UI isolate). A revision that rewrote /Encrypt under the same
+  /// object number does not; it authenticates [_password] like a fresh open.
+  /// See [PdfDocument.openAppended].
+  PdfDocument _openRevision(Uint8List bytes) =>
+      _document.openAppended(bytes, password: _password);
 
   /// Debug-only sanity check behind the assert in [_tryApplyIncrementalUpdate].
   ///
@@ -2830,6 +2981,9 @@ class PdfEditingController extends ChangeNotifier {
   /// discarding undo history. Used by [applyRedactions] (the burned file
   /// is not a prefix of the prior buffer).
   void _resetTo(Uint8List bytes, {required PdfEditImpact impact}) {
+    // a file without /ID keeps filing its secrets under the hash of the bytes
+    // as opened - take it before they are replaced (the burn is O(file) too)
+    _resolveFormSecretId();
     final secrets = _revisionSecrets[_cursor];
     _revisionSecrets
       ..clear()
@@ -2856,7 +3010,10 @@ class PdfEditingController extends ChangeNotifier {
     // viewer blanks each page's raster instead of holding the (now
     // un-redacted) one up while the fresh render lands
     if (impact.destructive) _destructiveStampEpoch++;
-    _document = PdfDocument.open(bytes, password: _password);
+    // the compaction refuses an encrypted file, so a burned file opens plainly
+    // and keys are donated only when nothing burned and the editor saved an
+    // ordinary incremental update
+    _document = _openRevision(bytes);
     _revisionId++;
     _invalidateElements();
     notifyListeners();
@@ -8844,7 +9001,10 @@ class PdfEditingController extends ChangeNotifier {
   /// pointer event.
   PdfAcroForm? get acroForm {
     if (!_formResolved) {
-      _form = PdfAcroForm.of(_document);
+      _form = PdfAcroForm.of(_document,
+          onFields: _formSecretsPending
+              ? _decideFormSecretsOn(opened: _cursor == 0)
+              : null);
       _formResolved = true;
     }
     return _form;
@@ -8920,11 +9080,13 @@ class PdfEditingController extends ChangeNotifier {
     _pendingSecrets = {...current, name: value};
     final bool committed;
     try {
+      // always the id the store files under - never null, which would make
+      // setPasswordValue hash the *current* revision for a file without /ID
       committed = _fillField(
           name,
           const {PdfFieldType.text},
           (e, f) =>
-              e.setPasswordValue(f, value, documentId: _formSecretIdBytes));
+              e.setPasswordValue(f, value, documentId: _resolveFormSecretId()));
     } finally {
       _pendingSecrets = null;
     }
