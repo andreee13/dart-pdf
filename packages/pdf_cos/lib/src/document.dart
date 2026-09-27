@@ -87,10 +87,16 @@ class CosDocument {
   // (see [_cacheKey]) so [getObject] - the hottest path in the package -
   // resolves a warm object without allocating a CosReference per call (#522).
   final Map<int, CosObject> _cache = {};
-  // Identity-keyed reverse index of [_cache]: object -> the ref it loaded
-  // under. Keeps [referenceTo] O(1) instead of a linear scan of the cache on
-  // every call (editing code maps a mutated object back to its number per
-  // mutation). Kept in lockstep with [_cache] at every insert/remove site.
+  // The refs [_cacheKey] can't pack exactly (see [_packable]): junk
+  // generations, and object numbers past 2^32 - which a junk trailer /Size
+  // hands [CosIncrementalUpdater]'s allocator. Keyed by the ref itself, so
+  // nothing aliases; empty for any sane file.
+  final Map<CosReference, CosObject> _unpackedCache = {};
+  // Identity-keyed reverse index of [_cache] and [_unpackedCache]: object ->
+  // the ref it loaded under. Keeps [referenceTo] O(1) instead of a linear scan
+  // of the cache on every call (editing code maps a mutated object back to its
+  // number per mutation). Kept in lockstep with both at every insert/remove
+  // site.
   final Map<CosObject, CosReference> _reverseCache = Map.identity();
   final Map<int, _ObjectStream> _objectStreams = {};
 
@@ -280,12 +286,18 @@ class CosDocument {
     // Drop cached state for every redefined object so the next resolve re-reads
     // it from the appended bytes; untouched objects keep their warm cache.
     _cache.removeWhere((key, obj) {
-      if (!changed.contains(key ~/ 65536)) return false;
+      if (!changed.contains(_objectNumberOf(key))) return false;
       final reverse = _reverseCache[obj];
       if (reverse != null &&
+          _packable(reverse.objectNumber, reverse.generation) &&
           _cacheKey(reverse.objectNumber, reverse.generation) == key) {
         _reverseCache.remove(obj);
       }
+      return true;
+    });
+    _unpackedCache.removeWhere((ref, obj) {
+      if (!changed.contains(ref.objectNumber)) return false;
+      if (_reverseCache[obj] == ref) _reverseCache.remove(obj);
       return true;
     });
     _objectStreams.removeWhere((number, _) => changed.contains(number));
@@ -390,6 +402,7 @@ class CosDocument {
       }
     }
     document._cache.clear();
+    document._unpackedCache.clear();
     document._reverseCache.clear();
     document._objectStreams.clear();
 
@@ -593,24 +606,78 @@ class CosDocument {
   /// from the file, so it resolves (and [referenceTo] finds it) before the
   /// pending update is saved. [CosIncrementalUpdater.addObject] calls this
   /// for every object it allocates.
-  void adoptObject(CosReference ref, CosObject object) {
-    _cache[_cacheKey(ref.objectNumber, ref.generation)] = object;
+  void adoptObject(CosReference ref, CosObject object) => _store(ref, object);
+
+  /// Caches [object] under [ref] - packed when [_packable], otherwise in the
+  /// side map - and records the reverse mapping.
+  void _store(CosReference ref, CosObject object) {
+    final objectNumber = ref.objectNumber;
+    final generation = ref.generation;
+    if (_packable(objectNumber, generation)) {
+      _cache[_cacheKey(objectNumber, generation)] = object;
+    } else {
+      _unpackedCache[ref] = object;
+    }
     _reverseCache[object] = ref;
   }
 
-  /// Packs (objectNumber, generation) into one int cache key. Generations
-  /// are at most 65535 (a 5-digit xref field), and object numbers stay far
-  /// below 2^37, so the product fits dart2js's 53 safe bits. Multiplication,
-  /// not `<< 16`: JS bitwise shifts truncate to 32 bits under dart2js.
+  /// Packs (objectNumber, generation) into one int cache key, with the object
+  /// number in the low 32 bits. The low bits must carry the object number:
+  /// the VM/AOT/wasm `int.hashCode` is a multiply that keeps trailing zero
+  /// bits, so the old `objectNumber * 65536 + generation` put every key's low
+  /// 16 bits at zero and piled a large document's keys into shared
+  /// linear-probe chains (~8 us per lookup at 29k cached objects instead of
+  /// ~20 ns; full-graph walks like compaction spent most of their time there).
+  /// Don't "simplify" it back. Generation-0 keys - nearly every object - are
+  /// the object numbers themselves, which also keeps them under 2^30, on
+  /// dart2js's fast numeric-key path.
+  ///
+  /// Only [_packable] refs get a packed key: an object number in 0..2^32-1 and
+  /// a generation in 0..65535 (the xref field's range - an object body or a
+  /// reference can still carry any integer). Every key is then unique and
+  /// below 2^48, exact on dart2js's 53-bit ints too. Anything else lives in
+  /// [_unpackedCache], keyed by the [CosReference] itself - including the
+  /// object numbers past 2^32 that [CosIncrementalUpdater] allocates from a
+  /// junk trailer /Size, which must keep resolving. Multiplication, not
+  /// `<< 32`: JS bitwise operators truncate to 32 bits under dart2js.
   static int _cacheKey(int objectNumber, int generation) =>
-      objectNumber * 65536 + generation;
+      generation * _objectNumberLimit + objectNumber;
+
+  /// Whether [_cacheKey] holds (objectNumber, generation) exactly.
+  static bool _packable(int objectNumber, int generation) =>
+      objectNumber >= 0 &&
+      objectNumber < _objectNumberLimit &&
+      generation >= 0 &&
+      generation <= _maxPackedGeneration;
+
+  /// The object number [_cacheKey] packed into [key]. `%`, not `&`, for the
+  /// same dart2js reason.
+  static int _objectNumberOf(int key) => key % _objectNumberLimit;
+
+  /// One past the largest object number [_cacheKey] packs.
+  static const int _objectNumberLimit = 0x100000000;
+
+  /// The largest generation [_cacheKey] packs: the 5-digit xref field's max.
+  static const int _maxPackedGeneration = 0xFFFF;
+
+  /// [_cacheKey], exposed as a test hook. Not part of the stable API.
+  static int debugCacheKey(int objectNumber, int generation) =>
+      _cacheKey(objectNumber, generation);
 
   /// Loads an object by number, parsing it on first access.
   CosObject getObject(int objectNumber, int generation) {
-    final key = _cacheKey(objectNumber, generation);
-    final cached = _cache[key];
+    if (!_packable(objectNumber, generation)) {
+      return _unpackedCache[CosReference(objectNumber, generation)] ??
+          _load(objectNumber, generation);
+    }
+    final cached = _cache[_cacheKey(objectNumber, generation)];
     if (cached != null) return cached;
+    return _load(objectNumber, generation);
+  }
 
+  /// [getObject]'s miss path: parses the object and caches it (unless it is
+  /// missing or re-entrant, which answer null uncached).
+  CosObject _load(int objectNumber, int generation) {
     final entry = _xref[objectNumber];
     if (entry == null) return CosNull.instance;
 
@@ -677,8 +744,7 @@ class CosDocument {
     // key derives from it, and its presence marks the payload as still the
     // file's original bytes (see [CosStream.sourceRef]).
     if (result is CosStream) result.sourceRef = ref;
-    _cache[key] = result;
-    _reverseCache[result] = ref;
+    _store(ref, result);
     return result;
   }
 
