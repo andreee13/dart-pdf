@@ -77,16 +77,18 @@ jobs:
           flags: pdf_cos
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-      # FlateDecode takes a pure-Dart inflater under dart2js (a conditional
-      # import); the VM run above only sees it through a direct import. Run
-      # the same tests compiled to JS so FlateFilter and the compactor are
-      # exercised on the path browsers take. Content operands materialize by
-      # dart2js number rules there too (an integral double is an int), which
-      # only a JS run can see.
-      - name: Test pdf_cos zlib inflate and content operands under dart2js
+      # FlateDecode and SHA-384/512 take pure-Dart web implementations under
+      # dart2js (conditional imports: zlib_inflate.dart, sha2_digest.dart); the
+      # VM run above only sees them through direct imports. Run those tests
+      # compiled to JS so FlateFilter, the compactor and the AES-256 (R6)
+      # password hash are exercised on the path browsers take. Content
+      # operands materialize by dart2js number rules there too (an integral
+      # double is an int), which only a JS run can see.
+      - name: Test pdf_cos zlib inflate, SHA-384/512 and content operands under dart2js
         working-directory: packages/pdf_cos
         run: >-
           dart test -p node test/zlib_inflate_test.dart
+          test/sha512_js_test.dart
           test/content_operand_platform_test.dart
 
       - name: Test pdf_document
@@ -705,12 +707,13 @@ jobs:
         run: |
           dart run dart_pdf_editor:build_web_worker \
             --out packages/dart_pdf_editor/lib/src/sparse_test_worker.js
-      - name: Test sparse buffers and responsive PDF compression in web workers
+      - name: Test sparse buffers, in-place revisions and responsive PDF compression in web workers
         working-directory: packages/dart_pdf_editor
         run: >-
           flutter test --platform chrome --no-cross-origin-isolation
           test/render_worker_sparse_web_test.dart test/compression_worker_test.dart
           test/render_worker_text_reuse_test.dart
+          test/render_worker_revision_web_test.dart
           --reporter expanded
       - name: Test high-zoom tiles and atomic region replay in Chrome
         working-directory: packages/dart_pdf_editor
